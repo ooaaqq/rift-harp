@@ -6,17 +6,6 @@ import torch
 from torch import Tensor, nn
 
 
-def mel_center_frequencies(
-    channels: int, fmin: float, fmax: float, *, device: torch.device | None = None
-) -> Tensor:
-    if channels <= 0 or not 0 < fmin < fmax:
-        raise ValueError("invalid mel frequency contract")
-    mel_min = 2595.0 * math.log10(1.0 + fmin / 700.0)
-    mel_max = 2595.0 * math.log10(1.0 + fmax / 700.0)
-    mel = torch.linspace(mel_min, mel_max, channels, device=device)
-    return 700.0 * (torch.pow(10.0, mel / 2595.0) - 1.0)
-
-
 class HarmonicFeatures(nn.Module):
     """Fixed harmonic geometry; it carries positions, never target amplitudes."""
 
@@ -26,6 +15,7 @@ class HarmonicFeatures(nn.Module):
         self,
         mel_frequencies: Tensor,
         *,
+        mel_fmax: float,
         sample_rate: int,
         f0_min: float,
         f0_max: float,
@@ -44,8 +34,8 @@ class HarmonicFeatures(nn.Module):
         self.narrow_bandwidth = narrow_bandwidth_semitones
         self.wide_bandwidth = wide_bandwidth_semitones
         self.nyquist_ratio = nyquist_ratio
-        upper = min(float(mel_frequencies.max()), sample_rate * 0.5 * nyquist_ratio)
-        self.max_harmonic = max(1, math.ceil(upper / f0_min))
+        self.upper_frequency = min(mel_fmax, sample_rate * 0.5 * nyquist_ratio)
+        self.max_harmonic = max(1, math.floor(self.upper_frequency / f0_min))
         self.register_buffer("mel_frequencies", mel_frequencies.float())
         mean = torch.zeros(self.channels) if feature_mean is None else feature_mean
         std = torch.ones(self.channels) if feature_std is None else feature_std
@@ -71,18 +61,19 @@ class HarmonicFeatures(nn.Module):
         scalar_f0 = safe_f0.squeeze(-1)
         frequencies = self.mel_frequencies.float()
         ratio = frequencies.view(*([1] * (f0.ndim - 1)), -1) / safe_f0
-        nearest_index = ratio.round().clamp(1, self.max_harmonic)
+        maximum_index = torch.floor(self.upper_frequency / safe_f0).clamp(
+            1, self.max_harmonic
+        )
+        nearest_index = torch.minimum(
+            ratio.round().clamp(1, self.max_harmonic), maximum_index
+        )
         nearest_frequency = nearest_index * safe_f0
         distance = 12.0 * torch.log2(
             frequencies.view(*([1] * (f0.ndim - 1)), -1) / nearest_frequency
         )
         signed_distance = distance.clamp(-6, 6) / 6
 
-        upper = min(
-            float(self.mel_frequencies.max()),
-            self.sample_rate * 0.5 * self.nyquist_ratio,
-        )
-        narrow, wide = self._occupancy(scalar_f0, frequencies, upper)
+        narrow, wide = self._occupancy(scalar_f0, frequencies, self.upper_frequency)
         narrow = narrow / narrow.amax(dim=-1, keepdim=True).clamp_min(1e-8)
         wide = wide / wide.amax(dim=-1, keepdim=True).clamp_min(1e-8)
         harmonic_index = torch.log1p(nearest_index) / math.log1p(self.max_harmonic)

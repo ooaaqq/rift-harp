@@ -9,7 +9,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from torch import Tensor
+from torch import Tensor, nn
 
 ALPHA_CANDIDATES = (0.5, 0.625, 0.75, 0.875, 1.0)
 GAIN_CAP = 4.0
@@ -23,16 +23,23 @@ class CovarianceDiagnostics:
     variance_max_min: float
 
 
-@dataclass
-class FlowTransform:
-    mean: Tensor
-    basis: Tensor
-    gain: Tensor
-    lambda_raw: Tensor
-    lambda_effective: Tensor
-    metadata: dict[str, Any]
-
-    def __post_init__(self) -> None:
+class FlowTransform(nn.Module):
+    def __init__(
+        self,
+        mean: Tensor,
+        basis: Tensor,
+        gain: Tensor,
+        lambda_raw: Tensor,
+        lambda_effective: Tensor,
+        metadata: dict[str, Any],
+    ) -> None:
+        super().__init__()
+        self.register_buffer("mean", mean.float())
+        self.register_buffer("basis", basis.float())
+        self.register_buffer("gain", gain.float())
+        self.register_buffer("lambda_raw", lambda_raw.float())
+        self.register_buffer("lambda_effective", lambda_effective.float())
+        self.metadata = metadata
         channels = self.mean.numel()
         expected = (channels, channels)
         if self.basis.shape != expected:
@@ -59,16 +66,20 @@ class FlowTransform:
         return self.mean.numel()
 
     def transform(self, mel: Tensor) -> Tensor:
-        mean = self.mean.to(device=mel.device, dtype=torch.float32)
-        basis = self.basis.to(device=mel.device, dtype=torch.float32)
-        gain = self.gain.to(device=mel.device, dtype=torch.float32)
-        return ((mel.float() - mean) @ basis.T) * gain
+        return ((mel.float() - self.mean) @ self.basis.T) * self.gain
 
     def inverse(self, transformed: Tensor) -> Tensor:
-        mean = self.mean.to(device=transformed.device, dtype=torch.float32)
-        basis = self.basis.to(device=transformed.device, dtype=torch.float32)
-        gain = self.gain.to(device=transformed.device, dtype=torch.float32)
-        return (transformed.float() / gain) @ basis + mean
+        return (transformed.float() / self.gain) @ self.basis + self.mean
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "mean": self.mean.detach().cpu(),
+            "basis": self.basis.detach().cpu(),
+            "gain": self.gain.detach().cpu(),
+            "lambda_raw": self.lambda_raw.detach().cpu(),
+            "lambda_effective": self.lambda_effective.detach().cpu(),
+            "metadata": self.metadata,
+        }
 
     def save(self, path: str | Path) -> str:
         target = Path(path)

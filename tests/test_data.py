@@ -1,9 +1,15 @@
 from pathlib import Path
 
+import pytest
 import torch
 
 from harp.config import HARPConfig, ModelConfig, SamplingConfig, TrainingConfig
-from harp.data import FeatureDataset, HierarchicalBatchSampler, collate_features
+from harp.data import (
+    FeatureDataset,
+    HierarchicalBatchSampler,
+    SampleRequest,
+    collate_features,
+)
 from harp.manifest import ManifestEntry
 
 
@@ -63,3 +69,50 @@ def test_mel_only_stats_path_does_not_require_content(tmp_path: Path) -> None:
     sample = dataset[0]
     assert "content" not in sample
     assert sample["mel"].shape == (20, 8)
+
+
+def test_feature_length_mismatch_is_rejected_instead_of_truncated(
+    tmp_path: Path,
+) -> None:
+    entry = _entry(tmp_path, 0, "A", "alice")
+    torch.save(torch.rand(entry.frames - 1), f"{entry.feature_prefix}.f0.pt")
+    dataset = FeatureDataset([entry], 8, 16)
+    with pytest.raises(ValueError, match="must match mel frames"):
+        dataset[0]
+
+
+def test_collate_always_pads_to_the_requested_bucket(tmp_path: Path) -> None:
+    entry = _entry(tmp_path, 0, "A", "alice")
+    dataset = FeatureDataset([entry], 8, 16)
+    sample = dataset[SampleRequest(0, 32, 7)]
+    batch = collate_features([sample])
+    assert batch["mel"].shape == (1, 32, 8)
+    assert int(batch["mask"].sum()) == 20
+    assert not batch["mask"][0, 20:].any()
+
+
+def test_sampler_resume_reproduces_uninterrupted_request_stream(tmp_path: Path) -> None:
+    entries = [
+        _entry(tmp_path, 0, "A", "alice"),
+        _entry(tmp_path, 1, "B", "bob"),
+    ]
+    config = HARPConfig(
+        num_speakers=2,
+        model=ModelConfig(mel_channels=8, content_dim=16),
+        training=TrainingConfig(
+            frame_buckets=(8, 16),
+            bucket_probabilities=(0.5, 0.5),
+        ),
+        sampling=SamplingConfig(
+            dataset_probabilities={"A": 0.25, "B": 0.75},
+            batch_size=2,
+            batch_frame_budget=16,
+            steps_per_epoch=8,
+        ),
+    )
+    uninterrupted = HierarchicalBatchSampler(entries, config)
+    all_batches = list(uninterrupted)
+
+    resumed = HierarchicalBatchSampler(entries, config)
+    resumed.set_epoch(0, 5)
+    assert list(resumed) == all_batches[5:]

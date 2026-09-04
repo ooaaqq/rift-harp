@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import random
+import statistics
 from collections import defaultdict
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ class SampleRequest:
     index: int
     frames: int
     seed: int
+    start: int | None = None
 
 
 def bounded_normalize(
@@ -85,21 +87,26 @@ class FeatureDataset(Dataset[dict[str, Tensor]]):
             request = SampleRequest(request, self.entries[request].frames, request)
         entry = self.entries[request.index]
         features = self._load(entry)
-        available = min(value.shape[0] for value in features.values())
+        available = features["mel"].shape[0]
         wanted = min(request.frames, available)
         rng = random.Random(request.seed)
-        starts = [rng.randrange(available - wanted + 1) for _ in range(8)]
-        voiced_start = max(
-            starts,
-            key=lambda start: float(
-                (features["f0"][start : start + wanted] > 0).float().mean()
-            ),
-        )
-        start = (
-            voiced_start
-            if rng.random() < self.voiced_crop_probability
-            else rng.choice(starts)
-        )
+        if request.start is None:
+            starts = [rng.randrange(available - wanted + 1) for _ in range(8)]
+            voiced_start = max(
+                starts,
+                key=lambda start: float(
+                    (features["f0"][start : start + wanted] > 0).float().mean()
+                ),
+            )
+            start = (
+                voiced_start
+                if rng.random() < self.voiced_crop_probability
+                else rng.choice(starts)
+            )
+        else:
+            start = request.start
+            if not 0 <= start <= available - wanted:
+                raise ValueError("fixed crop start is outside the recording")
         cropped = {
             name: value[start : start + wanted] for name, value in features.items()
         }
@@ -108,6 +115,8 @@ class FeatureDataset(Dataset[dict[str, Tensor]]):
             "speaker": torch.tensor(self.speaker_to_id[entry.speaker_key]),
             "length": torch.tensor(wanted),
             "requested_length": torch.tensor(request.frames),
+            "entry_index": torch.tensor(request.index),
+            "crop_start": torch.tensor(start),
         }
 
     def _load(self, entry: ManifestEntry) -> dict[str, Tensor]:
@@ -116,6 +125,11 @@ class FeatureDataset(Dataset[dict[str, Tensor]]):
             torch.load(f"{prefix}.mel.pt", map_location="cpu", weights_only=True),
             self.mel_channels,
         )
+        if mel.shape[0] != entry.frames:
+            raise ValueError(
+                f"{entry.id}: manifest frames {entry.frames} differ from mel "
+                f"frames {mel.shape[0]}"
+            )
         f0 = _vector(
             torch.load(f"{prefix}.f0.pt", map_location="cpu", weights_only=True)
         )
@@ -123,6 +137,17 @@ class FeatureDataset(Dataset[dict[str, Tensor]]):
             torch.load(f"{prefix}.rms.pt", map_location="cpu", weights_only=True)
         )
         result = {"mel": mel.float(), "f0": f0.float(), "rms": rms.float()}
+        if f0.shape[0] != mel.shape[0] or rms.shape[0] != mel.shape[0]:
+            raise ValueError(
+                f"{entry.id}: F0/RMS must match mel frames "
+                f"({f0.shape[0]}/{rms.shape[0]} vs {mel.shape[0]})"
+            )
+        if not torch.isfinite(result["mel"]).all():
+            raise ValueError(f"{entry.id}: mel contains non-finite values")
+        if not torch.isfinite(result["rms"]).all() or bool((result["rms"] < 0).any()):
+            raise ValueError(f"{entry.id}: RMS must be finite and nonnegative")
+        if bool(torch.isinf(result["f0"]).any()):
+            raise ValueError(f"{entry.id}: F0 contains infinite values")
         if not self.mel_only:
             content_path = entry.content_feature_path or f"{prefix}.content.pt"
             content = _matrix(
@@ -130,6 +155,8 @@ class FeatureDataset(Dataset[dict[str, Tensor]]):
                 self.content_dim,
             )
             result["content"] = _resize(content.float(), mel.shape[0])
+            if not torch.isfinite(result["content"]).all():
+                raise ValueError(f"{entry.id}: content contains non-finite values")
         return result
 
 
@@ -144,7 +171,9 @@ class HierarchicalBatchSampler(Sampler[list[SampleRequest]]):
         self.frame_buckets = training.frame_buckets
         self.bucket_probabilities = training.bucket_probabilities
         self.seed = sampling.seed
+        self.configured_dataset_families = sampling.dataset_families
         self.epoch = 0
+        self.start_step = 0
         hierarchy = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
         for index, entry in enumerate(entries):
             if entry.split == "train" and entry.quality_status == "accepted":
@@ -194,16 +223,23 @@ class HierarchicalBatchSampler(Sampler[list[SampleRequest]]):
                 self.song_probabilities[dataset][speaker] = dict(
                     zip(song_names, song_probabilities, strict=True)
                 )
+        self._validate_exposure_constraints(config)
 
     def __len__(self) -> int:
         return self.steps_per_epoch
 
-    def set_epoch(self, epoch: int) -> None:
+    def set_epoch(self, epoch: int, start_step: int = 0) -> None:
+        if not 0 <= start_step <= self.steps_per_epoch:
+            raise ValueError("sampler start step is outside the epoch")
         self.epoch = epoch
+        self.start_step = start_step
 
     def __iter__(self) -> Iterator[list[SampleRequest]]:
-        rng = random.Random(self.seed + self.epoch * 1_000_003)
-        for step in range(self.steps_per_epoch):
+        for step in range(self.start_step, self.steps_per_epoch):
+            # A batch is a pure function of (seed, epoch, step). This preserves
+            # the exact request stream when resuming without replaying prefetched
+            # batches from the beginning of the epoch.
+            rng = random.Random(self.seed + self.epoch * 1_000_003 + step * 97_003)
             frames = rng.choices(self.frame_buckets, self.bucket_probabilities, k=1)[0]
             batch_size = min(self.batch_size, self.batch_frame_budget // frames)
             batch = []
@@ -233,12 +269,160 @@ class HierarchicalBatchSampler(Sampler[list[SampleRequest]]):
                 batch.append(SampleRequest(index, frames, seed))
             yield batch
 
+    def _validate_exposure_constraints(self, config: HARPConfig) -> None:
+        sampling = config.sampling
+        dataset_weights = dict(
+            zip(self.datasets, self.dataset_probabilities, strict=True)
+        )
+        family_totals: dict[str, float] = defaultdict(float)
+        for dataset, probability in dataset_weights.items():
+            family = sampling.dataset_families.get(dataset, dataset)
+            family_totals[family] += probability
+        exceeded = {
+            family: family_totals.get(family, 0.0)
+            for family, cap in sampling.family_probability_caps.items()
+            if family_totals.get(family, 0.0) > cap + 1e-12
+        }
+        if exceeded:
+            raise ValueError(f"dataset family probability cap exceeded: {exceeded}")
+        real_probabilities = [
+            dataset_weights[dataset] * probability
+            for dataset, speakers in self.speaker_probabilities.items()
+            if dataset not in sampling.synthetic_datasets
+            for probability in speakers.values()
+        ]
+        if real_probabilities:
+            median = statistics.median(real_probabilities)
+            singleton = [
+                dataset_weights[dataset]
+                for dataset, speakers in self.speaker_probabilities.items()
+                if dataset not in sampling.synthetic_datasets and len(speakers) == 1
+            ]
+            maximum = max(singleton, default=0.0)
+            limit = median * sampling.max_singleton_real_speaker_median_ratio
+            if maximum > limit + 1e-12:
+                raise ValueError(
+                    "singleton real speaker probability exceeds median cap: "
+                    f"{maximum:.8f} > {limit:.8f}"
+                )
+
+    def sampling_audit(self, max_steps: int) -> dict[str, object]:
+        dataset_weights = dict(
+            zip(self.datasets, self.dataset_probabilities, strict=True)
+        )
+        expected_crops_per_step = sum(
+            probability * min(self.batch_size, self.batch_frame_budget // frames)
+            for frames, probability in zip(
+                self.frame_buckets, self.bucket_probabilities, strict=True
+            )
+        )
+        speakers = []
+        songs = []
+        recordings = []
+        for dataset in self.datasets:
+            for speaker, speaker_probability in self.speaker_probabilities[
+                dataset
+            ].items():
+                marginal = dataset_weights[dataset] * speaker_probability
+                speakers.append(
+                    {
+                        "dataset": dataset,
+                        "speaker": speaker,
+                        "probability": marginal,
+                        "expected_crops": marginal
+                        * expected_crops_per_step
+                        * max_steps,
+                    }
+                )
+                for song, song_probability in self.song_probabilities[dataset][
+                    speaker
+                ].items():
+                    song_marginal = marginal * song_probability
+                    songs.append(
+                        {
+                            "dataset": dataset,
+                            "speaker": speaker,
+                            "song": song,
+                            "probability": song_marginal,
+                            "expected_crops": (
+                                song_marginal * expected_crops_per_step * max_steps
+                            ),
+                        }
+                    )
+                    candidates = self.hierarchy[dataset][speaker][song]
+                    total_frames = sum(
+                        self.entries[index].frames for index in candidates
+                    )
+                    for index in candidates:
+                        entry = self.entries[index]
+                        recording_marginal = song_marginal * entry.frames / total_frames
+                        recordings.append(
+                            {
+                                "dataset": dataset,
+                                "speaker": speaker,
+                                "song": song,
+                                "recording_id": entry.id,
+                                "source_frames": entry.frames,
+                                "probability": recording_marginal,
+                                "expected_crops": (
+                                    recording_marginal
+                                    * expected_crops_per_step
+                                    * max_steps
+                                ),
+                            }
+                        )
+        expected_valid_frames_per_step = sum(
+            recording["probability"]
+            * sum(
+                bucket_probability
+                * min(self.batch_size, self.batch_frame_budget // bucket)
+                * min(int(recording["source_frames"]), bucket)
+                for bucket, bucket_probability in zip(
+                    self.frame_buckets, self.bucket_probabilities, strict=True
+                )
+            )
+            for recording in recordings
+        )
+        return {
+            "artifact_type": "harp_sampling_audit_v1",
+            "sampling_implementation": "hierarchical_sampler_step_keyed_v2",
+            "dataset_probabilities": dataset_weights,
+            "canonical_batches": {
+                str(frames): min(self.batch_size, self.batch_frame_budget // frames)
+                for frames in self.frame_buckets
+            },
+            "expected_crops_per_step": expected_crops_per_step,
+            "expected_requested_frames_per_step": sum(
+                probability
+                * min(self.batch_size, self.batch_frame_budget // frames)
+                * frames
+                for frames, probability in zip(
+                    self.frame_buckets, self.bucket_probabilities, strict=True
+                )
+            ),
+            "expected_valid_frames_per_step": expected_valid_frames_per_step,
+            "dataset_families": dict(self.configured_dataset_families),
+            "speakers": speakers,
+            "songs": songs,
+            "recordings": recordings,
+        }
+
 
 def collate_features(samples: Sequence[dict[str, Tensor]]) -> dict[str, Tensor]:
-    maximum = max(int(sample["length"]) for sample in samples)
+    requested = {int(sample["requested_length"]) for sample in samples}
+    if len(requested) != 1:
+        raise ValueError("a canonical batch must contain exactly one requested bucket")
+    maximum = requested.pop()
     result = {}
     for name in samples[0]:
-        if name in {"speaker", "length", "requested_length"}:
+        if name in {
+            "speaker",
+            "length",
+            "requested_length",
+            "entry_index",
+            "crop_start",
+            "noise_seed",
+        }:
             result[name] = torch.stack([sample[name] for sample in samples])
         else:
             result[name] = torch.stack(

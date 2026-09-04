@@ -9,8 +9,21 @@ def test_foundation_config_is_frozen_and_hashable() -> None:
     path = Path(__file__).parents[1] / "configs" / "foundation.json"
     config = HARPConfig.load(path)
     assert config.contract.model_family == "rift-harp"
-    assert config.training.betas == (0.9, 0.95)
+    assert config.optimizer.betas == (0.9, 0.95)
     assert config.model.harmonic_injection_blocks == (4, 8, 12)
+    assert config.model.activation_recompute_policy == "selective_expensive_ops"
+    assert config.model.heavy_linear_precision == "float8_rowwise"
+    assert config.training.compile_mode == "max-autotune"
+    assert config.sampling.batch_size == 96
+    assert config.sampling.batch_frame_budget == 24_576
+    assert {
+        frames: min(
+            config.sampling.batch_size,
+            config.sampling.batch_frame_budget // frames,
+        )
+        for frames in config.training.frame_buckets
+    } == {256: 96, 384: 64, 512: 48}
+    assert config.training.warmup_valid_frames == 163_072_000
     assert len(config.digest()) == 64
 
 

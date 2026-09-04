@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import dataclasses
-import hashlib
 import json
 from pathlib import Path
 
@@ -10,6 +8,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from .config import HARPConfig
+from .contracts import exposure_semantics_hash, json_sha256, stats_run_hash
 from .data import FeatureDataset, HierarchicalBatchSampler, collate_features
 from .flow_transform import fit_flow_transform
 from .manifest import load_manifest, manifest_sha256
@@ -76,9 +75,9 @@ def main() -> None:
     transform = fit_flow_transform(
         frames,
         seed=config.sampling.seed,
-        sampler_hash=_json_sha256(config.sampling),
+        sampler_hash=exposure_semantics_hash(config, manifest_sha256(args.manifest)),
         dataset_manifest_hash=manifest_sha256(args.manifest),
-        crop_policy_hash=_json_sha256(crop_contract),
+        crop_policy_hash=json_sha256(crop_contract),
     )
     transformed = transform.transform(frames)
     roundtrip = transform.inverse(transformed[:4096])
@@ -91,6 +90,14 @@ def main() -> None:
         "active_variance": _variance_summary(transformed[voiced]),
         "unvoiced_variance": _variance_summary(transformed[~voiced]),
     }
+    transform.metadata["exposure_semantics_hash"] = exposure_semantics_hash(
+        config, manifest_sha256(args.manifest)
+    )
+    transform.metadata["stats_run_hash"] = stats_run_hash(
+        seed=config.sampling.seed,
+        frame_count=args.frames,
+        stream="fit",
+    )
     transform.metadata["numeric_audit"] = {
         "lambda_floor_hit_fraction": float(
             (transform.lambda_raw < config.flow.lambda_floor).float().mean()
@@ -124,13 +131,6 @@ def _variance_summary(frames: torch.Tensor) -> dict[str, float | int]:
         "median": float(variance.median()),
         "max": float(variance.max()),
     }
-
-
-def _json_sha256(value: object) -> str:
-    if dataclasses.is_dataclass(value):
-        value = dataclasses.asdict(value)
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(encoded).hexdigest()
 
 
 if __name__ == "__main__":

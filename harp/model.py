@@ -6,9 +6,33 @@ from collections.abc import Iterator
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
+from torch.utils.checkpoint import (
+    CheckpointPolicy,
+    checkpoint,
+    create_selective_checkpoint_contexts,
+)
 
 from .config import HarmonicConfig, ModelConfig
-from .harmonic import HarmonicFeatures, mel_center_frequencies
+from .feature_contract import FeatureContract
+from .harmonic import HarmonicFeatures
+
+_EXPENSIVE_OPS = (
+    torch.ops.aten._scaled_mm.default,
+    torch.ops.aten.mm.default,
+    torch.ops.aten.addmm.default,
+    torch.ops.aten.bmm.default,
+    torch.ops.aten._scaled_dot_product_cudnn_attention.default,
+)
+
+
+def _selective_checkpoint_contexts():
+    def policy(_context, operation, *args, **kwargs):
+        del args, kwargs
+        if operation in _EXPENSIVE_OPS:
+            return CheckpointPolicy.MUST_SAVE
+        return CheckpointPolicy.PREFER_RECOMPUTE
+
+    return create_selective_checkpoint_contexts(policy)
 
 
 class Attention(nn.Module):
@@ -24,7 +48,7 @@ class Attention(nn.Module):
 
     def forward(self, x: Tensor, mask: Tensor | None) -> Tensor:
         batch, frames, dim = x.shape
-        q, k, value = self.qkv(_masked(x, mask)).chunk(3, dim=-1)
+        q, k, value = _linear_frames(self.qkv, _masked(x, mask)).chunk(3, dim=-1)
         q = self.q_norm(q.view(batch, frames, self.heads, self.head_dim)).transpose(
             1, 2
         )
@@ -42,7 +66,8 @@ class Attention(nn.Module):
             dropout_p=0.0,
             scale=self.scale,
         )
-        return self.output(
+        return _linear_frames(
+            self.output,
             _masked(result.transpose(1, 2).reshape(batch, frames, dim), mask)
         )
 
@@ -57,11 +82,13 @@ class ConvFeedForward(nn.Module):
         self.output = nn.Linear(hidden, dim)
 
     def forward(self, x: Tensor, mask: Tensor | None) -> Tensor:
-        value, gate = self.input(_masked(x, mask)).chunk(2, dim=-1)
+        value, gate = _linear_frames(self.input, _masked(x, mask)).chunk(2, dim=-1)
         value = _masked(value, mask)
         gate = _masked(gate, mask)
         value = self.conv(value.transpose(1, 2)).transpose(1, 2)
-        return _masked(self.output((value * F.silu(gate)).contiguous()), mask)
+        return _masked(
+            _linear_frames(self.output, (value * F.silu(gate)).contiguous()), mask
+        )
 
 
 class LowRankModulation(nn.Module):
@@ -142,22 +169,32 @@ class HARPCore(nn.Module):
         self,
         config: ModelConfig,
         harmonic_config: HarmonicConfig,
+        feature_contract: FeatureContract,
         num_speakers: int,
     ) -> None:
         super().__init__()
         self.config = config
         self.null_speaker_id = num_speakers
-        mel_frequencies = mel_center_frequencies(
-            config.mel_channels, harmonic_config.fmin, harmonic_config.fmax
-        )
+        if feature_contract.channels != config.mel_channels:
+            raise ValueError("feature contract mel channels differ from the model")
         self.harmonic_features = HarmonicFeatures(
-            mel_frequencies,
+            feature_contract.mel_center_hz,
+            mel_fmax=harmonic_config.fmax,
             sample_rate=harmonic_config.sample_rate,
             f0_min=harmonic_config.f0_min,
             f0_max=harmonic_config.f0_max,
             narrow_bandwidth_semitones=harmonic_config.narrow_bandwidth_semitones,
             wide_bandwidth_semitones=harmonic_config.wide_bandwidth_semitones,
             nyquist_ratio=harmonic_config.nyquist_ratio,
+            feature_mean=feature_contract.harmonic_mean,
+            feature_std=feature_contract.harmonic_std,
+        )
+        self.rms_floor = feature_contract.rms_floor
+        self.register_buffer(
+            "rms_log_mean", torch.tensor(feature_contract.rms_log_mean).float()
+        )
+        self.register_buffer(
+            "rms_log_std", torch.tensor(feature_contract.rms_log_std).float()
         )
         self.state_input = nn.Linear(config.mel_channels, config.dim)
         self.content_input = nn.Sequential(
@@ -184,10 +221,10 @@ class HARPCore(nn.Module):
             nn.Linear(64, 64),
             nn.LayerNorm(64, elementwise_affine=False),
         )
-        self.content_gain = nn.Parameter(torch.tensor(0.85))
-        self.pitch_gain = nn.Parameter(torch.tensor(0.32))
-        self.harmonic_gain = nn.Parameter(torch.tensor(0.32))
-        self.energy_gain = nn.Parameter(torch.tensor(0.15))
+        self.content_mix = nn.Parameter(torch.tensor(0.85))
+        self.pitch_mix = nn.Parameter(torch.tensor(0.32))
+        self.harmonic_mix = nn.Parameter(torch.tensor(0.32))
+        self.energy_mix = nn.Parameter(torch.tensor(0.15))
         frame_dim = 512 + 128 + config.harmonic_dim + 64
         self.frame_condition = nn.Sequential(
             nn.Linear(frame_dim, config.dim),
@@ -231,14 +268,19 @@ class HARPCore(nn.Module):
         harmonic = self.harmonic_input(harmonic_map.flatten(-2))
         pitch = self.pitch_input(_pitch_features(f0, voiced))
         frame = self.frame_condition(
-            torch.cat(
+            _magnitude_preserving_concat(
                 (
-                    self.content_gain * self.content_input(content),
-                    self.pitch_gain * pitch,
-                    self.harmonic_gain * harmonic,
-                    self.energy_gain * self.energy_input(rms),
+                    self.content_input(content),
+                    pitch,
+                    harmonic,
+                    self.energy_input(rms),
                 ),
-                dim=-1,
+                (
+                    self.content_mix,
+                    self.pitch_mix,
+                    self.harmonic_mix,
+                    self.energy_mix,
+                ),
             )
         )
         x = self.input_mix(torch.cat((self.state_input(scaled_state), frame), dim=-1))
@@ -247,7 +289,21 @@ class HARPCore(nn.Module):
         for index, block in enumerate(self.blocks, start=1):
             if str(index) in self.harmonic_adapters:
                 x = x + self.harmonic_adapters[str(index)](harmonic)
-            x = block(x, time_code, speaker_code, mask)
+            if (
+                self.config.activation_recompute_policy == "selective_expensive_ops"
+                and self.training
+            ):
+                x = checkpoint(
+                    block,
+                    x,
+                    time_code,
+                    speaker_code,
+                    mask,
+                    use_reentrant=False,
+                    context_fn=_selective_checkpoint_contexts,
+                )
+            else:
+                x = block(x, time_code, speaker_code, mask)
         shift, scale = self.final_modulation(time_code, speaker_code).chunk(2, dim=-1)
         return _masked(self.output(_modulate(self.final_norm(x), shift, scale)), mask)
 
@@ -255,18 +311,33 @@ class HARPCore(nn.Module):
         voiced = torch.isfinite(f0) & (f0 > 0)
         return self.harmonic_features(f0, voiced)
 
+    def prepare_rms(self, rms: Tensor) -> Tensor:
+        log_rms = torch.log(rms.float().clamp_min(0) + self.rms_floor)
+        return (log_rms - self.rms_log_mean) / self.rms_log_std
+
+    def branch_mix_fractions(self) -> dict[str, float]:
+        names = ("content", "pitch", "harmonic", "energy")
+        values = torch.stack(
+            (self.content_mix, self.pitch_mix, self.harmonic_mix, self.energy_mix)
+        ).float()
+        fractions = values.square() / values.square().sum().clamp_min(1e-12)
+        return {
+            name: float(value.detach())
+            for name, value in zip(names, fractions, strict=True)
+        }
+
     def parameter_roles(self) -> Iterator[tuple[str, nn.Parameter, str]]:
         no_decay_names = {
-            "content_gain",
-            "pitch_gain",
-            "harmonic_gain",
-            "energy_gain",
+            "content_mix",
+            "pitch_mix",
+            "harmonic_mix",
+            "energy_mix",
         }
         for name, parameter in self.named_parameters():
             if name.startswith("speaker."):
                 role = "speaker"
             elif name in no_decay_names:
-                role = "branch_gain"
+                role = "branch_mix"
             elif ".feed_forward.input." in name:
                 role = "ff_expansion"
             elif ".feed_forward.output." in name:
@@ -308,6 +379,17 @@ class HARPCore(nn.Module):
         nn.init.normal_(
             self.speaker.weight, std=1 / math.sqrt(self.config.speaker_code_dim)
         )
+        nn.init.normal_(
+            self.state_input.weight, std=1 / math.sqrt(self.config.mel_channels)
+        )
+        nn.init.normal_(
+            self.frame_condition[0].weight,
+            std=1 / math.sqrt(self.frame_condition[0].in_features),
+        )
+        nn.init.normal_(
+            self.input_mix[0].weight,
+            std=1 / math.sqrt(self.input_mix[0].in_features),
+        )
         for block in self.blocks:
             _spectral_chunks(
                 block.attention.qkv.weight, 3, self.config.dim, self.config.dim
@@ -339,6 +421,23 @@ def _pitch_features(f0: Tensor, voiced: Tensor) -> Tensor:
     return torch.cat((log_f0, voiced.float(), phases.sin(), phases.cos()), dim=-1)
 
 
+def _magnitude_preserving_concat(
+    branches: tuple[Tensor, ...], mixing: tuple[Tensor, ...]
+) -> Tensor:
+    if len(branches) != len(mixing) or not branches:
+        raise ValueError(
+            "branches and mixing parameters must have equal nonzero length"
+        )
+    total_width = sum(branch.shape[-1] for branch in branches)
+    mixing_values = torch.stack(mixing).float()
+    denominator = mixing_values.square().sum().add(1e-12).sqrt()
+    scaled = []
+    for branch, value in zip(branches, mixing_values, strict=True):
+        factor = value / denominator * math.sqrt(total_width / branch.shape[-1])
+        scaled.append(branch * factor.to(branch.dtype))
+    return torch.cat(scaled, dim=-1)
+
+
 def _spectral_chunks(weight: Tensor, chunks: int, fan_in: int, fan_out: int) -> None:
     for chunk in weight.chunk(chunks, dim=0):
         _spectral_normal(chunk, fan_in, fan_out)
@@ -357,6 +456,11 @@ def _zero_linear(module: nn.Linear) -> None:
 
 def _masked(x: Tensor, mask: Tensor | None) -> Tensor:
     return x if mask is None else x * mask.unsqueeze(-1).to(x.dtype)
+
+
+def _linear_frames(linear: nn.Module, x: Tensor) -> Tensor:
+    shape = x.shape
+    return linear(x.reshape(-1, shape[-1])).reshape(*shape[:-1], -1)
 
 
 def _modulate(x: Tensor, shift: Tensor, scale: Tensor) -> Tensor:

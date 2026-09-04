@@ -73,6 +73,8 @@ class HARPFlow(nn.Module):
         self.speaker_drop_probability = speaker_drop_probability
         self.lambda_floor = lambda_floor
         self.q_floor = q_floor
+        self.capture_model_inputs = False
+        self.last_model_inputs: tuple[Tensor, ...] | None = None
 
     def forward(self, batch: dict[str, Tensor]) -> FlowLoss:
         raw_mel = batch["mel"].float()
@@ -102,16 +104,25 @@ class HARPFlow(nn.Module):
         harmonic = batch.get("harmonic")
         if harmonic is None:
             harmonic = self.model.prepare_harmonic(batch["f0"])
-        residual = self._model_residual(
+        rms = self.model.prepare_rms(batch["rms"])
+        model_inputs = (
             coefficients.c_in * state,
             batch["content"],
             batch["f0"],
-            batch["rms"],
+            rms,
             harmonic,
             speaker,
             timestep,
             mask,
         )
+        if self.capture_model_inputs:
+            limit = min(4, target.shape[0])
+            self.last_model_inputs = tuple(
+                value[:limit].detach() for value in model_inputs
+            )
+        else:
+            self.last_model_inputs = None
+        residual = self._model_residual(*model_inputs)
         weights = mask.unsqueeze(-1).float()
         squared = (residual - residual_target).square() * weights
         denominator = weights.sum(dim=(1, 2)).clamp_min(1) * target.shape[-1]
@@ -156,6 +167,7 @@ class HARPFlow(nn.Module):
             state = initial_noise.float().to(content.device)
         state = state * mask.unsqueeze(-1).float()
         harmonic = self.model.prepare_harmonic(f0)
+        rms = self.model.prepare_rms(rms)
         times = torch.linspace(
             0, 1, steps + 1, device=state.device, dtype=torch.float32
         )
@@ -207,7 +219,7 @@ class HARPFlow(nn.Module):
     ) -> Tensor:
         coefficients = flow_coefficients(
             timestep,
-            self.transform.lambda_raw.to(state.device),
+            self.transform.lambda_raw,
             lambda_floor=self.lambda_floor,
             q_floor=self.q_floor,
         )

@@ -1,9 +1,11 @@
 import torch
 
 from harp.config import HarmonicConfig, ModelConfig
+from harp.feature_contract import neutral_feature_contract
 from harp.flow import HARPFlow, flow_coefficients
 from harp.flow_transform import FlowTransform
 from harp.model import HARPCore
+from harp.telemetry import model_activation_telemetry
 
 
 def test_analytic_coefficients_at_path_endpoints() -> None:
@@ -52,6 +54,7 @@ def test_small_flow_trains_and_samples_in_raw_mel_space() -> None:
             harmonic_injection_blocks=(1,),
         ),
         HarmonicConfig(sample_rate=16000, fmin=40, fmax=7600),
+        neutral_feature_contract(channels, 40, 7600),
         num_speakers=3,
     )
     transform = FlowTransform(
@@ -87,3 +90,54 @@ def test_small_flow_trains_and_samples_in_raw_mel_space() -> None:
     )
     assert generated.shape == (1, 7, channels)
     assert generated.isfinite().all()
+
+
+def test_activation_telemetry_uses_captured_real_model_inputs() -> None:
+    channels = 8
+    model = HARPCore(
+        ModelConfig(
+            mel_channels=channels,
+            content_dim=16,
+            dim=32,
+            depth=2,
+            head_dim=8,
+            ff_hidden_dim=64,
+            kernel_size=5,
+            time_code_dim=32,
+            speaker_code_dim=32,
+            adaln_rank=8,
+            adaln_mixer_dim=16,
+            harmonic_dim=8,
+            harmonic_injection_blocks=(1,),
+        ),
+        HarmonicConfig(sample_rate=16000, fmin=40, fmax=7600),
+        neutral_feature_contract(channels, 40, 7600),
+        num_speakers=3,
+    )
+    transform = FlowTransform(
+        mean=torch.zeros(channels),
+        basis=torch.eye(channels),
+        gain=torch.ones(channels),
+        lambda_raw=torch.ones(channels),
+        lambda_effective=torch.ones(channels),
+        metadata={"artifact_type": "flow_transform_v1"},
+    )
+    system = HARPFlow(model, transform)
+    system.capture_model_inputs = True
+    mask = torch.ones(2, 7, dtype=torch.bool)
+    system(
+        {
+            "mel": torch.randn(2, 7, channels),
+            "content": torch.randn(2, 7, 16),
+            "f0": torch.rand(2, 7, 1) * 400 + 80,
+            "rms": torch.rand(2, 7, 1),
+            "speaker": torch.tensor([0, 2]),
+            "mask": mask,
+        }
+    )
+    assert system.last_model_inputs is not None
+    report = model_activation_telemetry(model, system.last_model_inputs)
+    assert report["state_projection"] > 0
+    assert report["frame_condition"] > 0
+    assert report["harmonic_adapter_1"] == 0
+    assert report["harmonic_adapter_1_to_residual_stream"] == 0

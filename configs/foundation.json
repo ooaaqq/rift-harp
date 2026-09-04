@@ -8,6 +8,7 @@
     "optimizer_role_map_version": 1
   },
   "flow": {
+    "audit_path": "artifacts/flow_transform_v1.audit.json",
     "cfg_domain": "residual",
     "coefficient_dtype": "float32",
     "lambda_floor": 0.0001,
@@ -15,6 +16,23 @@
     "q_floor": 0.000001,
     "timestep_sampling": "stratified_logit_normal",
     "transform_path": "artifacts/flow_transform_v1.npz"
+  },
+  "feature": {
+    "center": false,
+    "contract_path": "artifacts/feature_contract_v1.npz",
+    "hop_length": 512,
+    "log_base": "natural",
+    "log_clamp": 1e-9,
+    "mel_norm": "slaney",
+    "mel_scale": "slaney",
+    "n_fft": 2048,
+    "pad_mode": "reflect",
+    "power": 1.0,
+    "rms_definition": "waveform_frame_rms",
+    "rms_floor": 0.00001,
+    "sample_rate": 44100,
+    "win_length": 2048,
+    "waveform_amplitude_convention": "float_-1_to_1"
   },
   "harmonic": {
     "f0_max": 1600.0,
@@ -27,6 +45,7 @@
     "wide_bandwidth_semitones": 1.0
   },
   "model": {
+    "activation_recompute_policy": "selective_expensive_ops",
     "adaln_mixer_dim": 256,
     "adaln_rank": 128,
     "content_dim": 768,
@@ -35,6 +54,7 @@
     "ff_hidden_dim": 2816,
     "harmonic_dim": 128,
     "harmonic_injection_blocks": [4, 8, 12],
+    "heavy_linear_precision": "float8_rowwise",
     "head_dim": 64,
     "kernel_size": 31,
     "mel_channels": 128,
@@ -43,8 +63,9 @@
   },
   "num_speakers": 148,
   "sampling": {
-    "batch_frame_budget": 16384,
-    "batch_size": 64,
+    "batch_frame_budget": 24576,
+    "batch_size": 96,
+    "canonical_bucket_padding": true,
     "dataset_probabilities": {
       "ACE-Opencpop": 0.02,
       "GTSinger": 0.32,
@@ -53,6 +74,17 @@
       "Opencpop": 0.015,
       "OpenSinger": 0.435
     },
+    "dataset_families": {
+      "ACE-Opencpop": "Opencpop-family",
+      "Opencpop": "Opencpop-family"
+    },
+    "family_probability_caps": {
+      "Opencpop-family": 0.035
+    },
+    "max_singleton_real_speaker_median_ratio": 3.0,
+    "num_workers": 8,
+    "persistent_workers": true,
+    "prefetch_factor": 2,
     "seed": 2026,
     "song_duration_exponent": 0.5,
     "song_probability_ceiling_ratio": 2.0,
@@ -60,25 +92,48 @@
     "speaker_duration_exponent": 0.5,
     "speaker_probability_ceiling_ratio": 2.0,
     "speaker_probability_floor_ratio": 0.5,
-    "steps_per_epoch": 1000
+    "steps_per_epoch": 1000,
+    "synthetic_datasets": ["ACE-Opencpop"]
+  },
+  "optimizer": {
+    "betas": [0.9, 0.95],
+    "eps": 1e-8,
+    "roles": {
+      "adaln": {"learning_rate": 0.00015, "weight_decay": 0.01},
+      "backbone": {"learning_rate": 0.00015, "weight_decay": 0.01},
+      "branch_mix": {"learning_rate": 0.00015, "weight_decay": 0.0},
+      "ff_contraction": {"learning_rate": 0.000075, "weight_decay": 0.02},
+      "ff_expansion": {"learning_rate": 0.0003, "weight_decay": 0.005},
+      "harmonic_adapter": {"learning_rate": 0.00015, "weight_decay": 0.01},
+      "harmonic_encoder": {"learning_rate": 0.00015, "weight_decay": 0.01},
+      "output": {"learning_rate": 0.00015, "weight_decay": 0.01},
+      "speaker": {"learning_rate": 0.0002, "weight_decay": 0.0},
+      "stem": {"learning_rate": 0.00015, "weight_decay": 0.01}
+    }
   },
   "training": {
-    "base_learning_rate": 0.00015,
-    "betas": [0.9, 0.95],
+    "allow_tf32": true,
+    "audit_checkpoint_every_valid_frames": 32614400,
     "bucket_probabilities": [0.2, 0.3, 0.5],
-    "checkpoint_every_steps": 5000,
     "compile_mode": "max-autotune",
-    "ema_decay": 0.9999,
-    "eps": 1e-8,
+    "inductor_epilogue_fusion": true,
+    "inductor_shape_padding": true,
+    "ema_reference_decay": 0.9999,
+    "ema_reference_frames": 16307.2,
+    "endpoint_every_valid_frames": 163072000,
     "frame_buckets": [256, 384, 512],
+    "full_checkpoint_every_valid_frames": 81536000,
+    "full_panel_every_valid_frames": 326144000,
     "grad_clip_norm": 1.0,
+    "health_every_valid_frames": 16000000,
+    "local_audit_every_valid_frames": 80000000,
     "log_every_steps": 20,
     "max_steps": 500000,
     "precision": "bfloat16",
     "sdpa_backend": "cudnn",
     "speaker_drop_probability": 0.05,
-    "speaker_learning_rate": 0.0002,
+    "telemetry_every_steps": 500,
     "voiced_crop_probability": 0.7,
-    "warmup_steps": 10000
+    "warmup_valid_frames": 163072000
   }
 }

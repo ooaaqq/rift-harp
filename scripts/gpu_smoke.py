@@ -5,12 +5,14 @@ import json
 
 import torch
 
-from harp.config import HarmonicConfig, ModelConfig
+from harp.config import HarmonicConfig, ModelConfig, OptimizerConfig
+from harp.feature_contract import neutral_feature_contract
 from harp.flow import HARPFlow
 from harp.flow_transform import FlowTransform
 from harp.model import HARPCore
 from harp.optimizer import build_optimizer
 from harp.performance import compile_model_in_place, configure_cuda
+from harp.precision import configure_heavy_linears
 
 
 def main() -> None:
@@ -22,10 +24,22 @@ def main() -> None:
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")
     device = torch.device("cuda")
-    runtime = configure_cuda(device)
+    runtime = configure_cuda(device, sdpa_backend="cudnn", allow_tf32=True)
     model_config = ModelConfig() if args.full else _tiny_config()
     harmonic_config = HarmonicConfig()
-    model = HARPCore(model_config, harmonic_config, num_speakers=3).to(device)
+    model = HARPCore(
+        model_config,
+        harmonic_config,
+        neutral_feature_contract(
+            model_config.mel_channels,
+            harmonic_config.fmin,
+            harmonic_config.fmax,
+        ),
+        num_speakers=3,
+    ).to(device)
+    runtime.update(
+        configure_heavy_linears(model, model_config.heavy_linear_precision)
+    )
     transform = FlowTransform(
         mean=torch.zeros(model_config.mel_channels),
         basis=torch.eye(model_config.mel_channels),
@@ -33,11 +47,11 @@ def main() -> None:
         lambda_raw=torch.ones(model_config.mel_channels),
         lambda_effective=torch.ones(model_config.mel_channels),
         metadata={"artifact_type": "synthetic_smoke_only"},
-    )
+    ).to(device)
     system = HARPFlow(model, transform)
     if args.compile:
-        compile_model_in_place(model, "max-autotune")
-    optimizer = build_optimizer(model, fused=True)
+        compile_model_in_place(model, "max-autotune-no-cudagraphs")
+    optimizer = build_optimizer(model, OptimizerConfig(), fused=True)
     batch = _batch(model_config, args.frames, device)
     losses = []
     grad_norms = []
