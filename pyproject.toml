@@ -11,6 +11,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+evaluation = [
+    "soundfile>=0.13.1",
+    "torchaudio==2.12.1",
+    "torchfcpe==0.0.4",
+]
 dev = [
     "pytest>=8.4.0",
     "ruff>=0.14.0",
@@ -23,6 +28,7 @@ harp-audit-flow-transform = "harp.flow_audit_cli:main"
 harp-build-audit-panels = "harp.panel_cli:main"
 harp-audit-local-field = "harp.local_audit_cli:main"
 harp-audit-endpoint = "harp.endpoint_audit_cli:main"
+harp-render-full-panel = "harp.full_panel_cli:main"
 harp-train = "harp.train:main"
 
 [tool.pytest.ini_options]

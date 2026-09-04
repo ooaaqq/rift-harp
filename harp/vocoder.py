@@ -158,7 +158,10 @@ def synthesize_pc_nsf(
     if bool((f0 < 0).any()) or bool((f0 > 2000).any()):
         raise ValueError("F0 is outside [0, 2000] Hz")
     waveform = generator(mel.T[None].to(device), f0[None].to(device))
-    return waveform[0, 0].float().cpu().clamp(-1, 1)
+    waveform = waveform[0, 0].float().cpu()
+    if not torch.isfinite(waveform).all():
+        raise ValueError("PC-NSF produced a non-finite waveform")
+    return waveform.clamp(-1, 1)
 
 
 def _sha256(path: Path) -> str:

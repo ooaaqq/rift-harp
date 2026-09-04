@@ -117,9 +117,19 @@ harp-audit-endpoint \
   --panels artifacts/fixed_panels_v1.json \
   --checkpoint /path/to/audit.pt \
   --output /path/to/endpoint.json
+
+harp-render-full-panel \
+  --manifest /path/to/training.content.jsonl \
+  --panels artifacts/fixed_panels_v1.json \
+  --checkpoint /path/to/full.pt \
+  --output /path/to/full-panel \
+  --pc-nsf-checkout /path/to/SingingVocoders \
+  --pc-nsf-lock /path/to/pc_nsf_hifigan.lock.json \
+  --vocoder-checkpoint /path/to/pc_nsf_hifigan.ckpt
 ```
 
 The endpoint command covers raw and EMA weights with correct, null, and wrong
-speaker reconstruction. A-to-B speaker progress with an external speaker
-encoder remains a separate evaluation integration and is not claimed by this
-repository yet.
+speaker reconstruction, both pooled and split by requested context length. The
+full-panel command renders fixed raw/EMA PC-NSF audio and records pitch and
+waveform-tail diagnostics. A-to-B speaker progress with an external speaker
+encoder remains a separate evaluation integration and is not claimed yet.
