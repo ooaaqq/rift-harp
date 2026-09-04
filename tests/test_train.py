@@ -350,4 +350,9 @@ def test_local_and_endpoint_audits_run_on_frozen_synthetic_panel(
         ],
     )
     endpoint_main()
-    assert json.loads(endpoint_output.read_text())["results"]
+    endpoint_payload = json.loads(endpoint_output.read_text())
+    assert endpoint_payload["artifact_type"] == "harp_endpoint_audit_v2"
+    assert {result["requested_frames"] for result in endpoint_payload["results"]} == {
+        None,
+        4,
+    }

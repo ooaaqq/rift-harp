@@ -79,16 +79,16 @@ def main() -> None:
         q_floor=config.flow.q_floor,
     ).eval()
     dct = orthonormal_dct(config.model.mel_channels).to(device)
-    accumulators: dict[tuple[str, str, str, str, str], MetricAccumulator] = defaultdict(
-        MetricAccumulator
-    )
+    accumulators: dict[
+        tuple[str, str, str, int | None, str, str], MetricAccumulator
+    ] = defaultdict(MetricAccumulator)
     with torch.inference_mode():
         for state_name in ("raw", "ema"):
             model.load_state_dict(
                 checkpoint["model" if state_name == "raw" else "ema"], strict=True
             )
             model.eval()
-            for (panel_name, _), cpu_batch in batches.items():
+            for (panel_name, requested_frames), cpu_batch in batches.items():
                 batch = {name: value.to(device) for name, value in cpu_batch.items()}
                 initial_noise = _fixed_noise(batch, config.model.mel_channels, device)
                 speaker_conditions = {
@@ -118,14 +118,21 @@ def main() -> None:
                     prediction_dct = prediction @ dct.T
                     for stratum, selection in strata.items():
                         for band, (start, end) in BANDS.items():
-                            accumulators[
-                                (state_name, panel_name, condition_name, stratum, band)
-                            ].update(
-                                prediction_dct[..., start:end][selection],
-                                target_dct[..., start:end][selection],
-                            )
+                            prediction_band = prediction_dct[..., start:end][selection]
+                            target_band = target_dct[..., start:end][selection]
+                            for length_key in (None, requested_frames):
+                                accumulators[
+                                    (
+                                        state_name,
+                                        panel_name,
+                                        condition_name,
+                                        length_key,
+                                        stratum,
+                                        band,
+                                    )
+                                ].update(prediction_band, target_band)
     payload = {
-        "artifact_type": "harp_endpoint_audit_v1",
+        "artifact_type": "harp_endpoint_audit_v2",
         "checkpoint": str(args.checkpoint),
         "checkpoint_progress": checkpoint["progress"],
         "panel_artifact": str(args.panels),
@@ -137,11 +144,22 @@ def main() -> None:
                 "state": key[0],
                 "panel": key[1],
                 "speaker_condition": key[2],
-                "stratum": key[3],
-                "band": key[4],
+                "requested_frames": key[3],
+                "stratum": key[4],
+                "band": key[5],
                 **value.report(),
             }
-            for key, value in sorted(accumulators.items())
+            for key, value in sorted(
+                accumulators.items(),
+                key=lambda item: (
+                    item[0][0],
+                    item[0][1],
+                    item[0][2],
+                    -1 if item[0][3] is None else item[0][3],
+                    item[0][4],
+                    item[0][5],
+                ),
+            )
         ],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
