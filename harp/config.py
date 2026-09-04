@@ -23,7 +23,7 @@ class ModelConfig:
     adaln_mixer_dim: int = 256
     harmonic_dim: int = 128
     harmonic_injection_blocks: tuple[int, ...] = (4, 8, 12)
-    activation_recompute_policy: str = "none"
+    activation_recompute_policy: str = "selective_semantic_boundaries"
     heavy_linear_precision: str = "float8_rowwise"
 
 
@@ -201,8 +201,8 @@ class HARPConfig:
             raise ValueError("head_dim must be even")
         if self.model.heavy_linear_precision != "float8_rowwise":
             raise ValueError("HARP v1 requires rowwise FP8 heavy Linear training")
-        if self.model.activation_recompute_policy != "none":
-            raise ValueError("HARP v1 activation recompute policy must be none")
+        if self.model.activation_recompute_policy != "selective_semantic_boundaries":
+            raise ValueError("HARP v1 requires semantic-boundary recomputation")
         if any(
             not 1 <= block < self.model.depth
             for block in self.model.harmonic_injection_blocks

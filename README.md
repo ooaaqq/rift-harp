@@ -10,7 +10,8 @@ The production contract is:
 - rowwise FP8 for QKV, attention output, FF up, and FF down GEMMs;
 - BF16 for residual, conditioning, convolution, and cuDNN SDPA compute;
 - canonical `96 x 256`, `64 x 384`, and `48 x 512` batches;
-- ordinary autograd activation retention with no activation rematerialization;
+- selective rematerialization that retains heavy GEMMs, SDPA, DWConv, SiLU,
+  post-RoPE Q/K, and the gated FFN product;
 - warmup, EMA, checkpoints, and audit milestones measured in valid frames;
 - no V4 checkpoint resume, high-band loss, or auxiliary 2D refiner.
 

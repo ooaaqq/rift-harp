@@ -11,7 +11,7 @@ def test_foundation_config_is_frozen_and_hashable() -> None:
     assert config.contract.model_family == "rift-harp"
     assert config.optimizer.betas == (0.9, 0.95)
     assert config.model.harmonic_injection_blocks == (4, 8, 12)
-    assert config.model.activation_recompute_policy == "none"
+    assert config.model.activation_recompute_policy == "selective_semantic_boundaries"
     assert config.model.heavy_linear_precision == "float8_rowwise"
     assert config.training.compile_mode == "max-autotune"
     assert config.sampling.batch_size == 96

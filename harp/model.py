@@ -6,10 +6,36 @@ from collections.abc import Iterator
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
+from torch.utils.checkpoint import (
+    CheckpointPolicy,
+    checkpoint,
+    create_selective_checkpoint_contexts,
+)
 
 from .config import HarmonicConfig, ModelConfig
 from .feature_contract import FeatureContract
 from .harmonic import HarmonicFeatures
+
+_EXPENSIVE_OPS = (
+    torch.ops.aten._scaled_mm.default,
+    torch.ops.aten.mm.default,
+    torch.ops.aten.addmm.default,
+    torch.ops.aten.bmm.default,
+    torch.ops.aten.convolution.default,
+    torch.ops.aten.silu.default,
+    torch.ops.aten.clone.default,
+    torch.ops.aten._scaled_dot_product_cudnn_attention.default,
+)
+
+
+def _selective_checkpoint_contexts():
+    def policy(_context, operation, *args, **kwargs):
+        del args, kwargs
+        if operation in _EXPENSIVE_OPS:
+            return CheckpointPolicy.MUST_SAVE
+        return CheckpointPolicy.PREFER_RECOMPUTE
+
+    return create_selective_checkpoint_contexts(policy)
 
 
 class Attention(nn.Module):
@@ -34,6 +60,7 @@ class Attention(nn.Module):
         )
         value = value.view(batch, frames, self.heads, self.head_dim).transpose(1, 2)
         q, k = _rotary(q, k)
+        q, k = q.clone(), k.clone()
         attention_mask = None if mask is None else mask[:, None, None, :]
         result = F.scaled_dot_product_attention(
             q,
@@ -63,8 +90,10 @@ class ConvFeedForward(nn.Module):
         value = _masked(value, mask)
         gate = _masked(gate, mask)
         value = self.conv(value.transpose(1, 2)).transpose(1, 2)
+        gate = F.silu(gate)
+        product = (value * gate).clone()
         return _masked(
-            _linear_frames(self.output, (value * F.silu(gate)).contiguous()), mask
+            _linear_frames(self.output, product.contiguous()), mask
         )
 
 
@@ -266,7 +295,22 @@ class HARPCore(nn.Module):
         for index, block in enumerate(self.blocks, start=1):
             if str(index) in self.harmonic_adapters:
                 x = x + self.harmonic_adapters[str(index)](harmonic)
-            x = block(x, time_code, speaker_code, mask)
+            if (
+                self.config.activation_recompute_policy
+                == "selective_semantic_boundaries"
+                and self.training
+            ):
+                x = checkpoint(
+                    block,
+                    x,
+                    time_code,
+                    speaker_code,
+                    mask,
+                    use_reentrant=False,
+                    context_fn=_selective_checkpoint_contexts,
+                )
+            else:
+                x = block(x, time_code, speaker_code, mask)
         shift, scale = self.final_modulation(time_code, speaker_code).chunk(2, dim=-1)
         return _masked(self.output(_modulate(self.final_norm(x), shift, scale)), mask)
 

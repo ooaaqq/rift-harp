@@ -45,7 +45,7 @@
     "wide_bandwidth_semitones": 1.0
   },
   "model": {
-    "activation_recompute_policy": "none",
+    "activation_recompute_policy": "selective_semantic_boundaries",
     "adaln_mixer_dim": 256,
     "adaln_rank": 128,
     "content_dim": 768,
