@@ -78,29 +78,11 @@ class HarmonicFeatures(nn.Module):
         )
         signed_distance = distance.clamp(-6, 6) / 6
 
-        indices = torch.arange(
-            1, self.max_harmonic + 1, device=f0.device, dtype=torch.float32
-        )
-        harmonic_frequencies = scalar_f0.unsqueeze(-1) * indices
         upper = min(
             float(self.mel_frequencies.max()),
             self.sample_rate * 0.5 * self.nyquist_ratio,
         )
-        harmonic_valid = harmonic_frequencies < upper
-        mel = frequencies.view(*([1] * (f0.ndim - 1)), 1, -1)
-        harmonic_log_distance = 12.0 * torch.log2(
-            mel / harmonic_frequencies.unsqueeze(-1).clamp_min(1e-12)
-        )
-        weights = indices.rsqrt().view(*([1] * (f0.ndim - 1)), -1, 1)
-        valid_weights = weights * harmonic_valid.unsqueeze(-1)
-        narrow = (
-            torch.exp(-0.5 * (harmonic_log_distance / self.narrow_bandwidth).square())
-            * valid_weights
-        ).sum(dim=-2)
-        wide = (
-            torch.exp(-0.5 * (harmonic_log_distance / self.wide_bandwidth).square())
-            * valid_weights
-        ).sum(dim=-2)
+        narrow, wide = self._occupancy(scalar_f0, frequencies, upper)
         narrow = narrow / narrow.amax(dim=-1, keepdim=True).clamp_min(1e-8)
         wide = wide / wide.amax(dim=-1, keepdim=True).clamp_min(1e-8)
         harmonic_index = torch.log1p(nearest_index) / math.log1p(self.max_harmonic)
@@ -111,6 +93,46 @@ class HarmonicFeatures(nn.Module):
         ) / self.feature_std.view(normalization_shape)
         # Standardization must not turn unvoiced frames into nonzero features.
         return features * valid.to(features.dtype).unsqueeze(-1)
+
+    def _occupancy(
+        self, f0: Tensor, frequencies: Tensor, upper: float
+    ) -> tuple[Tensor, Tensor]:
+        flat_f0 = f0.reshape(-1)
+        narrow_parts = []
+        wide_parts = []
+        # Bound temporary storage independently of batch and crop length.
+        for frame_start in range(0, flat_f0.numel(), 1024):
+            frame_f0 = flat_f0[frame_start : frame_start + 1024]
+            narrow = torch.zeros(
+                frame_f0.shape[0], frequencies.numel(), device=f0.device
+            )
+            wide = torch.zeros_like(narrow)
+            for harmonic_start in range(1, self.max_harmonic + 1, 32):
+                indices = torch.arange(
+                    harmonic_start,
+                    min(harmonic_start + 32, self.max_harmonic + 1),
+                    device=f0.device,
+                    dtype=torch.float32,
+                )
+                harmonic_frequencies = frame_f0[:, None] * indices[None]
+                valid = harmonic_frequencies < upper
+                distance = 12.0 * torch.log2(
+                    frequencies[None, None, :]
+                    / harmonic_frequencies[:, :, None].clamp_min(1e-12)
+                )
+                weights = indices.rsqrt()[None, :, None] * valid[:, :, None]
+                narrow += (
+                    torch.exp(-0.5 * (distance / self.narrow_bandwidth).square())
+                    * weights
+                ).sum(dim=1)
+                wide += (
+                    torch.exp(-0.5 * (distance / self.wide_bandwidth).square())
+                    * weights
+                ).sum(dim=1)
+            narrow_parts.append(narrow)
+            wide_parts.append(wide)
+        shape = (*f0.shape, frequencies.numel())
+        return torch.cat(narrow_parts).view(shape), torch.cat(wide_parts).view(shape)
 
 
 def fit_harmonic_normalization(

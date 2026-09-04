@@ -13,6 +13,9 @@ The temporal backbone remains 1024 wide and 16 blocks deep. The first quality
 run uses BF16 model compute, FP32 flow arithmetic and ODE state, cuDNN SDPA,
 and `torch.compile(mode="max-autotune")`.
 
+Harmonic geometry is generated in bounded chunks and is static for an utterance.
+Sampling computes it once, then reuses it for every solver and CFG model call.
+
 The transform must be fitted before training. Its validation covariance must
 meet both `offdiag_ratio <= 0.10` and `max_abs_corr <= 0.30`. Failure is fatal;
 training must not silently substitute per-bin normalization.

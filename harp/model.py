@@ -222,12 +222,12 @@ class HARPCore(nn.Module):
         content: Tensor,
         f0: Tensor,
         rms: Tensor,
+        harmonic_map: Tensor,
         speaker: Tensor,
         timestep: Tensor,
         mask: Tensor | None = None,
     ) -> Tensor:
         voiced = torch.isfinite(f0) & (f0 > 0)
-        harmonic_map = self.harmonic_features(f0, voiced)
         harmonic = self.harmonic_input(harmonic_map.flatten(-2))
         pitch = self.pitch_input(_pitch_features(f0, voiced))
         frame = self.frame_condition(
@@ -250,6 +250,10 @@ class HARPCore(nn.Module):
             x = block(x, time_code, speaker_code, mask)
         shift, scale = self.final_modulation(time_code, speaker_code).chunk(2, dim=-1)
         return _masked(self.output(_modulate(self.final_norm(x), shift, scale)), mask)
+
+    def prepare_harmonic(self, f0: Tensor) -> Tensor:
+        voiced = torch.isfinite(f0) & (f0 > 0)
+        return self.harmonic_features(f0, voiced)
 
     def parameter_roles(self) -> Iterator[tuple[str, nn.Parameter, str]]:
         no_decay_names = {

@@ -33,11 +33,13 @@ def _small_model() -> HARPCore:
 
 def test_zero_initialized_core_is_a_zero_residual_predictor() -> None:
     model = _small_model()
+    f0 = torch.rand(2, 9, 1) * 500 + 80
     output = model(
         torch.randn(2, 9, 8),
         torch.randn(2, 9, 16),
-        torch.rand(2, 9, 1) * 500 + 80,
+        f0,
         torch.randn(2, 9, 1),
+        model.prepare_harmonic(f0),
         torch.tensor([0, 2]),
         torch.tensor([0.2, 0.8]),
         torch.tensor([[True] * 9, [True] * 7 + [False] * 2]),

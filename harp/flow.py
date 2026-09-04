@@ -99,11 +99,15 @@ class HARPFlow(nn.Module):
                 < self.speaker_drop_probability
             )
             speaker[dropped] = self.model.null_speaker_id
+        harmonic = batch.get("harmonic")
+        if harmonic is None:
+            harmonic = self.model.prepare_harmonic(batch["f0"])
         residual = self._model_residual(
             coefficients.c_in * state,
             batch["content"],
             batch["f0"],
             batch["rms"],
+            harmonic,
             speaker,
             timestep,
             mask,
@@ -151,6 +155,7 @@ class HARPFlow(nn.Module):
                 raise ValueError("initial noise shape does not match conditioning")
             state = initial_noise.float().to(content.device)
         state = state * mask.unsqueeze(-1).float()
+        harmonic = self.model.prepare_harmonic(f0)
         times = torch.linspace(
             0, 1, steps + 1, device=state.device, dtype=torch.float32
         )
@@ -158,7 +163,15 @@ class HARPFlow(nn.Module):
             timestep = times[index].expand(shape[0])
             delta = times[index + 1] - times[index]
             velocity = self._guided_velocity(
-                state, content, f0, rms, speaker, timestep, mask, guidance_strength
+                state,
+                content,
+                f0,
+                rms,
+                harmonic,
+                speaker,
+                timestep,
+                mask,
+                guidance_strength,
             )
             proposal = state + delta * velocity
             if method == "heun" and index + 1 < steps:
@@ -168,6 +181,7 @@ class HARPFlow(nn.Module):
                     content,
                     f0,
                     rms,
+                    harmonic,
                     speaker,
                     next_time,
                     mask,
@@ -185,6 +199,7 @@ class HARPFlow(nn.Module):
         content: Tensor,
         f0: Tensor,
         rms: Tensor,
+        harmonic: Tensor,
         speaker: Tensor,
         timestep: Tensor,
         mask: Tensor,
@@ -198,14 +213,21 @@ class HARPFlow(nn.Module):
         )
         scaled_state = coefficients.c_in * state
         conditional = self._model_residual(
-            scaled_state, content, f0, rms, speaker, timestep, mask
+            scaled_state, content, f0, rms, harmonic, speaker, timestep, mask
         )
         if strength == 1.0:
             residual = conditional
         else:
             null_speaker = torch.full_like(speaker, self.model.null_speaker_id)
             unconditional = self._model_residual(
-                scaled_state, content, f0, rms, null_speaker, timestep, mask
+                scaled_state,
+                content,
+                f0,
+                rms,
+                harmonic,
+                null_speaker,
+                timestep,
+                mask,
             )
             residual = unconditional + strength * (conditional - unconditional)
         return coefficients.c_skip * state + coefficients.c_out * residual
