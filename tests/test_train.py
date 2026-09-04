@@ -188,11 +188,36 @@ def _args(
         steps=steps,
         device="cpu",
         no_compile=True,
+        compiler_cache_artifact=None,
     )
 
 
 def _latest_full(output: Path) -> Path:
     return sorted(output.glob("full-*.pt"))[-1]
+
+
+def test_activation_telemetry_failure_does_not_stop_training(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config, entries, manifest = _setup(tmp_path)
+    monkeypatch.setattr(
+        "harp.train._git_metadata",
+        lambda: {"commit": "test", "dirty": False, "diff_sha256": "0" * 64},
+    )
+    monkeypatch.setattr(
+        "harp.train.model_activation_telemetry",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("telemetry probe failed")
+        ),
+    )
+    output = tmp_path / "telemetry-failure"
+    train(config, entries, _args(manifest, output, steps=1))
+    event_lines = (output / "events.jsonl").read_text().splitlines()
+    events = [json.loads(line) for line in event_lines]
+    training = [event for event in events if event["type"] == "train"]
+    assert training[-1]["telemetry_status"] == "failed"
+    assert "telemetry probe failed" in training[-1]["telemetry_error"]
+    assert _latest_full(output).is_file()
 
 
 def test_full_checkpoint_resume_matches_uninterrupted_training(

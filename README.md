@@ -10,9 +10,9 @@ The production contract is:
 - rowwise FP8 for QKV, attention output, FF up, and FF down GEMMs;
 - BF16 for residual, conditioning, convolution, and cuDNN SDPA compute;
 - canonical `96 x 256`, `64 x 384`, and `48 x 512` batches;
-- selective activation recomputation that saves heavy GEMMs and cuDNN SDPA;
+- ordinary autograd activation retention with no activation rematerialization;
 - warmup, EMA, checkpoints, and audit milestones measured in valid frames;
-- no V4 checkpoint resume, FP8, high-band loss, or auxiliary 2D refiner.
+- no V4 checkpoint resume, high-band loss, or auxiliary 2D refiner.
 
 ## Required artifacts
 
@@ -66,7 +66,12 @@ All static shapes live under one CUDA Graph Trees manager so their captures use
 the same device memory pool:
 
 ```bash
-uv run python scripts/gpu_preflight.py --rotation-steps 30
+export TORCHINDUCTOR_CACHE_DIR=/some/persistent/rift-harp-sm120-cache
+export TORCHINDUCTOR_FX_GRAPH_CACHE=1
+export TORCHINDUCTOR_AUTOGRAD_CACHE=1
+uv run python scripts/gpu_preflight.py \
+  --rotation-steps 30 \
+  --save-cache-artifact artifacts/compiler-cache-sm120.bin
 ```
 
 Validate config and manifest resolution without starting optimization:
@@ -84,6 +89,7 @@ directory:
 harp-train \
   --manifest /path/to/training.content.jsonl \
   --output /path/to/new-run \
+  --compiler-cache-artifact artifacts/compiler-cache-sm120.bin \
   --execute-training
 ```
 

@@ -6,33 +6,10 @@ from collections.abc import Iterator
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
-from torch.utils.checkpoint import (
-    CheckpointPolicy,
-    checkpoint,
-    create_selective_checkpoint_contexts,
-)
 
 from .config import HarmonicConfig, ModelConfig
 from .feature_contract import FeatureContract
 from .harmonic import HarmonicFeatures
-
-_EXPENSIVE_OPS = (
-    torch.ops.aten._scaled_mm.default,
-    torch.ops.aten.mm.default,
-    torch.ops.aten.addmm.default,
-    torch.ops.aten.bmm.default,
-    torch.ops.aten._scaled_dot_product_cudnn_attention.default,
-)
-
-
-def _selective_checkpoint_contexts():
-    def policy(_context, operation, *args, **kwargs):
-        del args, kwargs
-        if operation in _EXPENSIVE_OPS:
-            return CheckpointPolicy.MUST_SAVE
-        return CheckpointPolicy.PREFER_RECOMPUTE
-
-    return create_selective_checkpoint_contexts(policy)
 
 
 class Attention(nn.Module):
@@ -289,21 +266,7 @@ class HARPCore(nn.Module):
         for index, block in enumerate(self.blocks, start=1):
             if str(index) in self.harmonic_adapters:
                 x = x + self.harmonic_adapters[str(index)](harmonic)
-            if (
-                self.config.activation_recompute_policy == "selective_expensive_ops"
-                and self.training
-            ):
-                x = checkpoint(
-                    block,
-                    x,
-                    time_code,
-                    speaker_code,
-                    mask,
-                    use_reentrant=False,
-                    context_fn=_selective_checkpoint_contexts,
-                )
-            else:
-                x = block(x, time_code, speaker_code, mask)
+            x = block(x, time_code, speaker_code, mask)
         shift, scale = self.final_modulation(time_code, speaker_code).chunk(2, dim=-1)
         return _masked(self.output(_modulate(self.final_norm(x), shift, scale)), mask)
 

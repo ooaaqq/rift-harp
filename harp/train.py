@@ -21,6 +21,7 @@ from .checkpoint import (
     validate_checkpoint_contract,
     validate_contract_identity,
 )
+from .compiler_cache import load_compiler_cache_artifact
 from .config import HARPConfig
 from .contracts import (
     batch_runtime,
@@ -57,6 +58,7 @@ def main() -> None:
     parser.add_argument("--steps", type=int)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--no-compile", action="store_true")
+    parser.add_argument("--compiler-cache-artifact", type=Path)
     parser.add_argument("--execute-training", action="store_true")
     args = parser.parse_args()
     config = HARPConfig.load(args.config)
@@ -151,6 +153,9 @@ def train(config: HARPConfig, entries: list, args: argparse.Namespace) -> None:
     runtime.update(
         configure_heavy_linears(model, config.model.heavy_linear_precision)
     )
+    compiler_cache_artifact = getattr(args, "compiler_cache_artifact", None)
+    if compiler_cache_artifact is not None:
+        runtime.update(load_compiler_cache_artifact(compiler_cache_artifact))
     system = HARPFlow(
         model,
         transform,
@@ -259,16 +264,23 @@ def train(config: HARPConfig, entries: list, args: argparse.Namespace) -> None:
             )
             telemetry = None
             activations = None
+            telemetry_error = None
             if telemetry_due:
-                telemetry = optimizer_role_telemetry(
-                    model, optimizer, clip_coefficient=clip_coefficient
-                )
-                if system.last_model_inputs is None:
-                    raise RuntimeError("activation telemetry inputs were not captured")
-                activations = model_activation_telemetry(
-                    model, system.last_model_inputs
-                )
-                system.last_model_inputs = None
+                try:
+                    telemetry = optimizer_role_telemetry(
+                        model, optimizer, clip_coefficient=clip_coefficient
+                    )
+                    if system.last_model_inputs is None:
+                        raise RuntimeError(
+                            "activation telemetry inputs were not captured"
+                        )
+                    activations = model_activation_telemetry(
+                        model, system.last_model_inputs
+                    )
+                except Exception as error:
+                    telemetry_error = f"{type(error).__name__}: {error}"
+                finally:
+                    system.last_model_inputs = None
             optimizer.zero_grad(set_to_none=True)
             ema_decay = ema_decay_for_batch(config.training, counts["valid_frames"])
             _update_ema(ema, model, ema_decay)
@@ -301,15 +313,22 @@ def train(config: HARPConfig, entries: list, args: argparse.Namespace) -> None:
                 }
                 if telemetry is not None:
                     event["optimizer_role_telemetry"] = telemetry
+                if activations is not None:
                     event["model_activation_telemetry"] = activations
+                if telemetry_due:
+                    event["telemetry_status"] = (
+                        "ok" if telemetry_error is None else "failed"
+                    )
+                    if telemetry_error is not None:
+                        event["telemetry_error"] = telemetry_error
                 print(json.dumps(event), flush=True)
-                _append_run_event(args.output, "train", event)
+                _append_run_event_fail_open(args.output, "train", event)
                 started, logged_frames = time.perf_counter(), 0
             milestones = _crossed_milestones(
                 config, previous_valid_frames, progress.seen_valid_frames
             )
             if milestones:
-                _append_run_event(
+                _append_run_event_fail_open(
                     args.output,
                     "frame_milestone",
                     {"progress": progress.to_dict(), "milestones": milestones},
@@ -356,13 +375,23 @@ def train(config: HARPConfig, entries: list, args: argparse.Namespace) -> None:
                     if name in {"local", "endpoint", "full_panel"}
                 ]
                 if requested_audits:
-                    _append_audit_request(
-                        args.output,
-                        path,
-                        requested_audits,
-                        progress,
-                        contract,
-                    )
+                    try:
+                        _append_audit_request(
+                            args.output,
+                            path,
+                            requested_audits,
+                            progress,
+                            contract,
+                        )
+                    except Exception as error:
+                        _append_run_event_fail_open(
+                            args.output,
+                            "audit_request_failed",
+                            {
+                                "step": progress.global_step,
+                                "error": f"{type(error).__name__}: {error}",
+                            },
+                        )
             if progress.global_step >= target_steps:
                 return
         epoch += 1
@@ -548,6 +577,30 @@ def _append_run_event(output: Path, event_type: str, payload: dict) -> None:
         handle.write(json.dumps(event, sort_keys=True) + "\n")
         handle.flush()
         os.fsync(handle.fileno())
+
+
+def _append_run_event_fail_open(
+    output: Path, event_type: str, payload: dict, retries: int = 2
+) -> None:
+    for attempt in range(retries + 1):
+        try:
+            _append_run_event(output, event_type, payload)
+            return
+        except Exception as error:
+            if attempt < retries:
+                time.sleep(0.05 * (attempt + 1))
+                continue
+            print(
+                json.dumps(
+                    {
+                        "type": "logging_failed",
+                        "event_type": event_type,
+                        "error": f"{type(error).__name__}: {error}",
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
 
 
 def _write_immutable_json(path: Path, payload: dict) -> None:

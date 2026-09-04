@@ -78,7 +78,6 @@ def optimizer_role_telemetry(
     return result
 
 
-@torch.inference_mode()
 def model_activation_telemetry(
     model: HARPCore, model_inputs: tuple[Tensor, ...]
 ) -> dict[str, float]:
@@ -91,7 +90,13 @@ def model_activation_telemetry(
         def hook(
             _module: nn.Module, _inputs: tuple[Tensor, ...], output: Tensor
         ) -> None:
-            value = output.float()
+            value = output.detach()
+            # TorchAO Float8Tensor subclasses only implement a restricted set of
+            # shape operations.  Observability belongs at the semantic output
+            # boundary, so leave the wrapper before masking or reshaping.
+            if type(value).__module__.startswith("torchao."):
+                value = value.dequantize()
+            value = value.float()
             selection = mask
             if value.ndim == 3 and value.shape[1] == mask.shape[1]:
                 value = value[selection]

@@ -11,6 +11,7 @@ from pathlib import Path
 
 import torch
 
+from harp.compiler_cache import save_compiler_cache_artifact
 from harp.config import HARPConfig
 from harp.feature_contract import FeatureContract, validate_feature_contract
 from harp.flow import HARPFlow
@@ -26,6 +27,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Full HARP RTX preflight")
     parser.add_argument("--config", type=Path, default=Path("configs/foundation.json"))
     parser.add_argument("--rotation-steps", type=int, default=30)
+    parser.add_argument("--save-cache-artifact", type=Path)
     parser.add_argument(
         "--stage-one-only",
         action="store_true",
@@ -180,6 +182,8 @@ def main() -> None:
             for name, values in timings.items()
         },
     }
+    if args.save_cache_artifact is not None:
+        report.update(save_compiler_cache_artifact(args.save_cache_artifact))
     print(json.dumps(report, indent=2, sort_keys=True))
     if unexpected_graphs:
         raise RuntimeError(f"unexpected compiled graphs detected: {unique_graphs}")
