@@ -165,7 +165,7 @@ def train(config: HARPConfig, entries: list, args: argparse.Namespace) -> None:
                 elapsed = time.perf_counter() - started
                 event = {
                     "step": step,
-                    "loss": float(loss.total),
+                    "loss": float(loss.total.detach()),
                     "grad_norm": float(grad_norm),
                     "frames_per_second": logged_frames / elapsed,
                     "lambda_floor_fraction": loss.lambda_floor_fraction,

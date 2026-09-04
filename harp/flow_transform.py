@@ -12,6 +12,7 @@ import torch
 from torch import Tensor
 
 ALPHA_CANDIDATES = (0.5, 0.625, 0.75, 0.875, 1.0)
+GAIN_CAP = 4.0
 
 
 @dataclass(frozen=True)
@@ -181,12 +182,13 @@ def fit_flow_transform(
         raise ValueError("flow transform contract failed validation variance spread")
     lambda_effective = lambda_raw.clamp_min(lambda_floor)
     floor_fraction = float((lambda_raw < lambda_floor).double().mean())
+    gain_audit = _gain_audit(variance, alpha, gain, lambda_raw)
     metadata = {
         "artifact_type": "flow_transform_v1",
         "contract_accepted": True,
         "basis_kind": basis_kind,
         "alpha": alpha,
-        "gain_clip_relative_median": [1 / 3, 3],
+        "gain_clip_relative_median": [1 / GAIN_CAP, GAIN_CAP],
         "lambda_floor": lambda_floor,
         "lambda_floor_fraction": floor_fraction,
         "seed": seed,
@@ -199,6 +201,12 @@ def fit_flow_transform(
         "dct_validation": _diagnostics_dict(dct_val_diagnostics),
         "fit": _diagnostics_dict(fit_diagnostics),
         "validation": _diagnostics_dict(validation_diagnostics),
+        "lambda": {
+            "p95_p05": fit_diagnostics.variance_p95_p05,
+            "max_min": fit_diagnostics.variance_max_min,
+            "median": float(lambda_raw.median()),
+        },
+        "gain_audit": gain_audit,
     }
     return FlowTransform(
         mean=mean.float(),
@@ -236,7 +244,7 @@ def _select_gain(variance: Tensor) -> tuple[float, Tensor, Tensor]:
     failures = []
     for alpha in ALPHA_CANDIDATES:
         raw = (variance + epsilon).pow(-alpha / 2)
-        relative = (raw / raw.median()).clamp(1 / 3, 3)
+        relative = (raw / raw.median()).clamp(1 / GAIN_CAP, GAIN_CAP)
         global_scale = (relative.square() * variance).median().rsqrt()
         gain = global_scale * relative
         transformed_variance = gain.square() * variance
@@ -252,15 +260,44 @@ def _select_gain(variance: Tensor) -> tuple[float, Tensor, Tensor]:
                 "max_min": max_min,
                 "min_mode": int(transformed_variance.argmin()),
                 "max_mode": int(transformed_variance.argmax()),
-                "gain_clip_low_fraction": float((relative == 1 / 3).double().mean()),
-                "gain_clip_high_fraction": float((relative == 3).double().mean()),
+                "gain_clip_low_fraction": float(
+                    (relative == 1 / GAIN_CAP).double().mean()
+                ),
+                "gain_clip_high_fraction": float(
+                    (relative == GAIN_CAP).double().mean()
+                ),
             }
         )
         if p95_p05 <= 16 and max_min <= 64:
             return alpha, gain, transformed_variance
     raise ValueError(
-        f"no alpha satisfies variance spread under the 3x gain cap: {failures}"
+        f"no alpha satisfies variance spread under the {GAIN_CAP:g}x gain cap: "
+        f"{failures}"
     )
+
+
+def _gain_audit(
+    variance: Tensor, alpha: float, gain: Tensor, transformed_variance: Tensor
+) -> dict[str, object]:
+    raw_gain = variance.pow(-alpha / 2)
+    relative = raw_gain / raw_gain.median()
+    lower_modes = torch.where(relative < 1 / GAIN_CAP)[0].tolist()
+    upper_modes = torch.where(relative > GAIN_CAP)[0].tolist()
+
+    def mode_details(index: int) -> dict[str, float | int]:
+        return {
+            "mode": index,
+            "raw_variance": float(variance[index]),
+            "gain": float(gain[index]),
+            "transformed_lambda": float(transformed_variance[index]),
+        }
+
+    return {
+        "lower_cap_modes": lower_modes,
+        "upper_cap_modes": upper_modes,
+        "mode_0": mode_details(0),
+        "mode_127": mode_details(len(variance) - 1),
+    }
 
 
 def _covariance(samples: Tensor) -> Tensor:

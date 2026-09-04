@@ -81,10 +81,24 @@ def main() -> None:
         crop_policy_hash=_json_sha256(crop_contract),
     )
     transformed = transform.transform(frames)
+    roundtrip = transform.inverse(transformed[:4096])
+    roundtrip_error = (roundtrip - frames[:4096].float()).abs()
+    timestep = torch.linspace(0, 1, 1001)[:, None]
+    lambda_effective = transform.lambda_effective[None]
+    q_raw = timestep.square() * lambda_effective + (1 - timestep).square()
     transform.metadata["exposure"] = {
         "voiced_fraction": float(voiced.float().mean()),
         "active_variance": _variance_summary(transformed[voiced]),
         "unvoiced_variance": _variance_summary(transformed[~voiced]),
+    }
+    transform.metadata["numeric_audit"] = {
+        "lambda_floor_hit_fraction": float(
+            (transform.lambda_raw < config.flow.lambda_floor).float().mean()
+        ),
+        "q_floor_hit_fraction": float((q_raw < config.flow.q_floor).float().mean()),
+        "q_min": float(q_raw.min()),
+        "roundtrip_max_abs_error": float(roundtrip_error.max()),
+        "roundtrip_mean_abs_error": float(roundtrip_error.mean()),
     }
     digest = transform.save(args.output)
     print(

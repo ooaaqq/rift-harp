@@ -1,9 +1,15 @@
 import torch
 
-from harp.flow_transform import FlowTransform, fit_flow_transform, orthonormal_dct
+from harp.flow_transform import (
+    GAIN_CAP,
+    FlowTransform,
+    fit_flow_transform,
+    orthonormal_dct,
+)
 
 
 def test_dct_is_orthonormal() -> None:
+    assert GAIN_CAP == 4.0
     basis = orthonormal_dct(16)
     torch.testing.assert_close(basis @ basis.T, torch.eye(16), atol=2e-6, rtol=2e-6)
 
