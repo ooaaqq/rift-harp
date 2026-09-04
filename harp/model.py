@@ -23,7 +23,6 @@ _EXPENSIVE_OPS = (
     torch.ops.aten.bmm.default,
     torch.ops.aten.convolution.default,
     torch.ops.aten.silu.default,
-    torch.ops.aten.clone.default,
     torch.ops.aten._scaled_dot_product_cudnn_attention.default,
 )
 
@@ -60,7 +59,6 @@ class Attention(nn.Module):
         )
         value = value.view(batch, frames, self.heads, self.head_dim).transpose(1, 2)
         q, k = _rotary(q, k)
-        q, k = q.clone(), k.clone()
         attention_mask = None if mask is None else mask[:, None, None, :]
         result = F.scaled_dot_product_attention(
             q,
@@ -91,9 +89,8 @@ class ConvFeedForward(nn.Module):
         gate = _masked(gate, mask)
         value = self.conv(value.transpose(1, 2)).transpose(1, 2)
         gate = F.silu(gate)
-        product = (value * gate).clone()
         return _masked(
-            _linear_frames(self.output, product.contiguous()), mask
+            _linear_frames(self.output, (value * gate).contiguous()), mask
         )
 
 
