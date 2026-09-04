@@ -1,0 +1,62 @@
+{
+  "contract": {
+    "architecture_version": 1,
+    "checkpoint_schema": 1,
+    "feature_contract_version": 1,
+    "flow_contract_version": 1,
+    "model_family": "rift-harp",
+    "optimizer_role_map_version": 1
+  },
+  "flow": {
+    "cfg_domain": "residual",
+    "coefficient_dtype": "float32",
+    "lambda_floor": 0.0001,
+    "ode_state_dtype": "float32",
+    "q_floor": 0.000001,
+    "timestep_sampling": "stratified_logit_normal",
+    "transform_path": "artifacts/flow_transform_v1.npz"
+  },
+  "harmonic": {
+    "f0_max": 1600.0,
+    "f0_min": 40.0,
+    "fmax": 16000.0,
+    "fmin": 40.0,
+    "narrow_bandwidth_semitones": 0.35,
+    "nyquist_ratio": 0.95,
+    "sample_rate": 44100,
+    "wide_bandwidth_semitones": 1.0
+  },
+  "model": {
+    "adaln_mixer_dim": 256,
+    "adaln_rank": 128,
+    "content_dim": 768,
+    "depth": 16,
+    "dim": 1024,
+    "ff_hidden_dim": 2816,
+    "harmonic_dim": 128,
+    "harmonic_injection_blocks": [4, 8, 12],
+    "head_dim": 64,
+    "kernel_size": 31,
+    "mel_channels": 128,
+    "speaker_code_dim": 256,
+    "time_code_dim": 256
+  },
+  "num_speakers": 148,
+  "training": {
+    "base_learning_rate": 0.00015,
+    "betas": [0.9, 0.95],
+    "bucket_probabilities": [0.2, 0.3, 0.5],
+    "compile_mode": "max-autotune",
+    "ema_decay": 0.9999,
+    "eps": 1e-8,
+    "frame_buckets": [256, 384, 512],
+    "grad_clip_norm": 1.0,
+    "max_steps": 500000,
+    "precision": "bfloat16",
+    "sdpa_backend": "cudnn",
+    "speaker_drop_probability": 0.05,
+    "speaker_learning_rate": 0.0002,
+    "voiced_crop_probability": 0.7,
+    "warmup_steps": 10000
+  }
+}
