@@ -2,7 +2,7 @@ import torch
 
 from harp.config import HarmonicConfig, ModelConfig, OptimizerConfig
 from harp.feature_contract import neutral_feature_contract
-from harp.model import HARPCore, _magnitude_preserving_concat
+from harp.model import _EXPENSIVE_OPS, HARPCore, _magnitude_preserving_concat
 from harp.optimizer import build_optimizer, parameter_role_manifest
 from harp.precision import heavy_linear_names
 
@@ -28,6 +28,18 @@ def _small_model() -> HARPCore:
         neutral_feature_contract(8, 40, 7600),
         num_speakers=3,
     )
+
+
+def test_selective_recompute_saves_only_real_expensive_producers() -> None:
+    assert set(_EXPENSIVE_OPS) == {
+        torch.ops.aten._scaled_mm.default,
+        torch.ops.aten.mm.default,
+        torch.ops.aten.addmm.default,
+        torch.ops.aten.bmm.default,
+        torch.ops.aten.convolution.default,
+        torch.ops.aten.silu.default,
+        torch.ops.aten._scaled_dot_product_cudnn_attention.default,
+    }
 
 
 def test_zero_initialized_core_is_a_zero_residual_predictor() -> None:

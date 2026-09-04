@@ -10,7 +10,7 @@ The production contract is:
 - rowwise FP8 for QKV, attention output, FF up, and FF down GEMMs;
 - BF16 for residual, conditioning, convolution, and cuDNN SDPA compute;
 - canonical `96 x 256`, `64 x 384`, and `48 x 512` batches;
-- selective rematerialization that retains heavy GEMMs, SDPA, and DWConv;
+- selective rematerialization that retains heavy GEMMs, SDPA, DWConv, and SiLU;
 - warmup, EMA, checkpoints, and audit milestones measured in valid frames;
 - no V4 checkpoint resume, high-band loss, or auxiliary 2D refiner.
 

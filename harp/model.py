@@ -22,6 +22,7 @@ _EXPENSIVE_OPS = (
     torch.ops.aten.addmm.default,
     torch.ops.aten.bmm.default,
     torch.ops.aten.convolution.default,
+    torch.ops.aten.silu.default,
     torch.ops.aten._scaled_dot_product_cudnn_attention.default,
 )
 
