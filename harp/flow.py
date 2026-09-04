@@ -233,11 +233,13 @@ class HARPFlow(nn.Module):
         return coefficients.c_skip * state + coefficients.c_out * residual
 
     def _model_residual(self, *args: Tensor) -> Tensor:
-        dtype = next(self.model.parameters()).dtype
-        inputs = [
-            value.to(dtype) if value.is_floating_point() else value for value in args
-        ]
-        return self.model(*inputs).float()
+        device_type = next(self.model.parameters()).device.type
+        with torch.autocast(
+            device_type=device_type,
+            dtype=torch.bfloat16,
+            enabled=device_type == "cuda",
+        ):
+            return self.model(*args).float()
 
 
 def sample_timestep(batch: int, device: torch.device) -> Tensor:

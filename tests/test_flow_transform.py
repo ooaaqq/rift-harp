@@ -16,7 +16,7 @@ def test_transform_round_trip_and_artifact(tmp_path) -> None:
         gain=torch.linspace(0.5, 2, channels),
         lambda_raw=torch.ones(channels),
         lambda_effective=torch.ones(channels),
-        metadata={"artifact_type": "flow_transform_v1"},
+        metadata={"artifact_type": "flow_transform_v1", "contract_accepted": True},
     )
     value = torch.randn(3, 11, channels)
     torch.testing.assert_close(

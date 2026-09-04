@@ -42,15 +42,37 @@
     "time_code_dim": 256
   },
   "num_speakers": 148,
+  "sampling": {
+    "batch_frame_budget": 16384,
+    "batch_size": 64,
+    "dataset_probabilities": {
+      "ACE-Opencpop": 0.02,
+      "GTSinger": 0.32,
+      "Kiritan": 0.01,
+      "M4Singer": 0.2,
+      "Opencpop": 0.015,
+      "OpenSinger": 0.435
+    },
+    "seed": 2026,
+    "song_duration_exponent": 0.5,
+    "song_probability_ceiling_ratio": 2.0,
+    "song_probability_floor_ratio": 0.5,
+    "speaker_duration_exponent": 0.5,
+    "speaker_probability_ceiling_ratio": 2.0,
+    "speaker_probability_floor_ratio": 0.5,
+    "steps_per_epoch": 1000
+  },
   "training": {
     "base_learning_rate": 0.00015,
     "betas": [0.9, 0.95],
     "bucket_probabilities": [0.2, 0.3, 0.5],
+    "checkpoint_every_steps": 5000,
     "compile_mode": "max-autotune",
     "ema_decay": 0.9999,
     "eps": 1e-8,
     "frame_buckets": [256, 384, 512],
     "grad_clip_norm": 1.0,
+    "log_every_steps": 20,
     "max_steps": 500000,
     "precision": "bfloat16",
     "sdpa_backend": "cudnn",

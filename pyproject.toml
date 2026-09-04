@@ -17,6 +17,7 @@ dev = [
 
 [project.scripts]
 harp-build-flow-transform = "harp.transform_cli:main"
+harp-train = "harp.train:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
@@ -37,4 +38,3 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["harp"]
-

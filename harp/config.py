@@ -65,6 +65,23 @@ class TrainingConfig:
     precision: str = "bfloat16"
     compile_mode: str = "max-autotune"
     sdpa_backend: str = "cudnn"
+    log_every_steps: int = 20
+    checkpoint_every_steps: int = 5000
+
+
+@dataclass(frozen=True)
+class SamplingConfig:
+    dataset_probabilities: dict[str, float] = field(default_factory=dict)
+    speaker_duration_exponent: float = 0.5
+    speaker_probability_floor_ratio: float = 0.5
+    speaker_probability_ceiling_ratio: float = 2.0
+    song_duration_exponent: float = 0.5
+    song_probability_floor_ratio: float = 0.5
+    song_probability_ceiling_ratio: float = 2.0
+    batch_size: int = 64
+    batch_frame_budget: int = 16_384
+    steps_per_epoch: int = 1000
+    seed: int = 2026
 
 
 @dataclass(frozen=True)
@@ -84,6 +101,7 @@ class HARPConfig:
     flow: FlowConfig = field(default_factory=FlowConfig)
     harmonic: HarmonicConfig = field(default_factory=HarmonicConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
+    sampling: SamplingConfig = field(default_factory=SamplingConfig)
     contract: ContractConfig = field(default_factory=ContractConfig)
 
     def validate(self) -> None:
@@ -116,6 +134,12 @@ class HARPConfig:
             raise ValueError("HARP v1 supports BF16 model compute only")
         if self.flow.cfg_domain != "residual":
             raise ValueError("CFG must operate in the residual domain")
+        if not isinstance(self.sampling, SamplingConfig):
+            raise TypeError("sampling must be a SamplingConfig")
+        if not self.sampling.dataset_probabilities:
+            raise ValueError("dataset probabilities must not be empty")
+        if abs(sum(self.sampling.dataset_probabilities.values()) - 1.0) > 1e-6:
+            raise ValueError("dataset probabilities must sum to one")
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -152,6 +176,7 @@ class HARPConfig:
             flow=FlowConfig(**payload["flow"]),
             harmonic=HarmonicConfig(**payload["harmonic"]),
             training=TrainingConfig(**training_payload),
+            sampling=SamplingConfig(**payload["sampling"]),
             contract=ContractConfig(**payload["contract"]),
         )
         config.validate()

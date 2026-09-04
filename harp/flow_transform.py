@@ -154,7 +154,13 @@ def fit_flow_transform(
     variance = rotated_fit.var(dim=0, correction=1).clamp_min(
         torch.finfo(torch.float64).eps
     )
-    alpha, gain, lambda_raw = _select_gain(variance)
+    try:
+        alpha, gain, lambda_raw = _select_gain(variance)
+    except ValueError as error:
+        raise ValueError(
+            f"basis={basis_kind}; dct_validation="
+            f"{_diagnostics_dict(dct_val_diagnostics)}; {error}"
+        ) from error
     transformed_fit = rotated_fit * gain
     transformed_validation = rotated_validation * gain
     fit_diagnostics = covariance_diagnostics(transformed_fit)
@@ -177,6 +183,7 @@ def fit_flow_transform(
     floor_fraction = float((lambda_raw < lambda_floor).double().mean())
     metadata = {
         "artifact_type": "flow_transform_v1",
+        "contract_accepted": True,
         "basis_kind": basis_kind,
         "alpha": alpha,
         "gain_clip_relative_median": [1 / 3, 3],
@@ -226,6 +233,7 @@ def covariance_diagnostics(samples: Tensor) -> CovarianceDiagnostics:
 
 def _select_gain(variance: Tensor) -> tuple[float, Tensor, Tensor]:
     epsilon = torch.finfo(variance.dtype).eps
+    failures = []
     for alpha in ALPHA_CANDIDATES:
         raw = (variance + epsilon).pow(-alpha / 2)
         relative = (raw / raw.median()).clamp(1 / 3, 3)
@@ -235,9 +243,24 @@ def _select_gain(variance: Tensor) -> tuple[float, Tensor, Tensor]:
         ordered = transformed_variance.sort().values
         p05 = ordered[max(0, math.floor(0.05 * (len(ordered) - 1)))]
         p95 = ordered[min(len(ordered) - 1, math.ceil(0.95 * (len(ordered) - 1)))]
-        if p95 / p05 <= 16 and ordered[-1] / ordered[0] <= 64:
+        p95_p05 = float(p95 / p05)
+        max_min = float(ordered[-1] / ordered[0])
+        failures.append(
+            {
+                "alpha": alpha,
+                "p95_p05": p95_p05,
+                "max_min": max_min,
+                "min_mode": int(transformed_variance.argmin()),
+                "max_mode": int(transformed_variance.argmax()),
+                "gain_clip_low_fraction": float((relative == 1 / 3).double().mean()),
+                "gain_clip_high_fraction": float((relative == 3).double().mean()),
+            }
+        )
+        if p95_p05 <= 16 and max_min <= 64:
             return alpha, gain, transformed_variance
-    raise ValueError("no alpha satisfies variance spread under the 3x gain cap")
+    raise ValueError(
+        f"no alpha satisfies variance spread under the 3x gain cap: {failures}"
+    )
 
 
 def _covariance(samples: Tensor) -> Tensor:

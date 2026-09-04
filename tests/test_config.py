@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from harp.config import HARPConfig
+from harp.config import HARPConfig, SamplingConfig
 
 
 def test_foundation_config_is_frozen_and_hashable() -> None:
@@ -17,7 +17,10 @@ def test_foundation_config_is_frozen_and_hashable() -> None:
 def test_old_checkpoint_family_is_rejected() -> None:
     from harp.checkpoint import validate_checkpoint_contract
 
-    config = HARPConfig(num_speakers=3)
+    config = HARPConfig(
+        num_speakers=3,
+        sampling=SamplingConfig(dataset_probabilities={"test": 1.0}),
+    )
     with pytest.raises(ValueError, match="not a RIFT-HARP"):
         validate_checkpoint_contract(
             {"model_family": "rift-svc-v4", "checkpoint_schema": 4}, config
