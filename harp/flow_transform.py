@@ -11,6 +11,18 @@ import numpy as np
 import torch
 from torch import Tensor, nn
 
+
+def full_precision_matmul(left: Tensor, right: Tensor) -> Tensor:
+    """Perform critical transform GEMMs without CUDA TF32 contraction."""
+    if left.device.type != "cuda":
+        return left @ right
+    previous = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = False
+    try:
+        return left @ right
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = previous
+
 ALPHA_CANDIDATES = (0.5, 0.625, 0.75, 0.875, 1.0)
 GAIN_CAP = 4.0
 
@@ -66,10 +78,13 @@ class FlowTransform(nn.Module):
         return self.mean.numel()
 
     def transform(self, mel: Tensor) -> Tensor:
-        return ((mel.float() - self.mean) @ self.basis.T) * self.gain
+        return full_precision_matmul(mel.float() - self.mean, self.basis.T) * self.gain
 
     def inverse(self, transformed: Tensor) -> Tensor:
-        return (transformed.float() / self.gain) @ self.basis + self.mean
+        return (
+            full_precision_matmul(transformed.float() / self.gain, self.basis)
+            + self.mean
+        )
 
     def to_payload(self) -> dict[str, Any]:
         return {

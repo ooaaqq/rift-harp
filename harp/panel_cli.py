@@ -105,11 +105,20 @@ def _build_panel(
         entry = entries[index]
         grouped[(entry.dataset, entry.speaker)].append(index)
     rng = random.Random(seed)
+    # Shuffle the stratification units once so coverage is independent of
+    # dictionary/name ordering. Reuse the assignment stream across lengths.
     speaker_groups = sorted(grouped)
+    rng.shuffle(speaker_groups)
+    assignments = [
+        speaker_groups[position % len(speaker_groups)]
+        for position in range(samples_per_length * len(lengths))
+    ]
     result = []
+    assignment_index = 0
     for length in lengths:
         for position in range(samples_per_length):
-            group = speaker_groups[position % len(speaker_groups)]
+            group = assignments[assignment_index]
+            assignment_index += 1
             index = rng.choice(grouped[group])
             request_seed = seed + length * 100_003 + position
             sample = dataset[SampleRequest(index, length, request_seed)]

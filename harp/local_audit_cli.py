@@ -14,7 +14,7 @@ from .config import HARPConfig
 from .data import FeatureDataset, SampleRequest, collate_features
 from .feature_contract import FeatureContract
 from .flow import HARPFlow, flow_coefficients
-from .flow_transform import FlowTransform, orthonormal_dct
+from .flow_transform import FlowTransform, full_precision_matmul, orthonormal_dct
 from .manifest import load_manifest, manifest_sha256
 from .model import HARPCore
 from .panel_cli import validate_panel_features
@@ -187,12 +187,14 @@ def main() -> None:
                             coefficients.c_skip * state + coefficients.c_out * residual
                         )
                         target_y = target - noise
-                        prediction_raw = (
-                            prediction_y / transform.gain
-                        ) @ transform.basis
-                        target_raw = (target_y / transform.gain) @ transform.basis
-                        prediction_dct = prediction_raw @ dct.T
-                        target_dct = target_raw @ dct.T
+                        prediction_raw = full_precision_matmul(
+                            prediction_y / transform.gain, transform.basis
+                        )
+                        target_raw = full_precision_matmul(
+                            target_y / transform.gain, transform.basis
+                        )
+                        prediction_dct = full_precision_matmul(prediction_raw, dct.T)
+                        target_dct = full_precision_matmul(target_raw, dct.T)
                         for stratum, selection in selections.items():
                             for band, (start, end) in BANDS.items():
                                 accumulators[

@@ -78,6 +78,7 @@ def optimizer_role_telemetry(
     return result
 
 
+@torch.no_grad()
 def model_activation_telemetry(
     model: HARPCore, model_inputs: tuple[Tensor, ...]
 ) -> dict[str, float]:

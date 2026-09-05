@@ -8,11 +8,19 @@ from harp.data import (
     FeatureDataset,
     HierarchicalBatchSampler,
     SampleRequest,
+    bounded_normalize,
     collate_features,
 )
 from harp.manifest import ManifestEntry
 
 
+def test_bounded_normalize_respects_bounds_without_order_bias() -> None:
+    first = bounded_normalize([8, 1, 1, 1], 0.125, 0.5)
+    second = bounded_normalize([1, 8, 1, 1], 0.125, 0.5)
+    assert first == pytest.approx([0.5, 1 / 6, 1 / 6, 1 / 6])
+    assert second == pytest.approx([1 / 6, 0.5, 1 / 6, 1 / 6])
+    assert sum(first) == pytest.approx(1.0)
+    assert all(0.125 <= value <= 0.5 for value in first)
 def _entry(tmp_path: Path, index: int, dataset: str, speaker: str) -> ManifestEntry:
     prefix = tmp_path / f"features-{index}"
     frames = 20 + index

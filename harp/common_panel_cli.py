@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import statistics
 import tempfile
@@ -324,18 +325,22 @@ def paired_comparison(
 def grouped_bootstrap_ci(
     grouped: dict[str, list[float]], *, bootstrap_samples: int, seed: int
 ) -> list[float]:
-    song_means = torch.tensor(
-        [statistics.fmean(values) for values in grouped.values()],
-        dtype=torch.float64,
+    if not grouped or any(not values for values in grouped.values()):
+        raise ValueError("grouped bootstrap requires non-empty groups")
+    song_sums = torch.tensor(
+        [math.fsum(values) for values in grouped.values()], dtype=torch.float64
+    )
+    song_counts = torch.tensor(
+        [len(values) for values in grouped.values()], dtype=torch.float64
     )
     generator = torch.Generator().manual_seed(seed)
     draws = torch.randint(
-        len(song_means),
-        (bootstrap_samples, len(song_means)),
+        len(song_sums),
+        (bootstrap_samples, len(song_sums)),
         generator=generator,
     )
     interval = torch.quantile(
-        song_means[draws].mean(1),
+        song_sums[draws].sum(1) / song_counts[draws].sum(1),
         torch.tensor((0.025, 0.975), dtype=torch.float64),
     )
     return [float(value) for value in interval]

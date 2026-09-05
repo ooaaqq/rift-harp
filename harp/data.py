@@ -34,27 +34,37 @@ def bounded_normalize(
         raise ValueError("bounded normalization requires finite positive weights")
     if count * lower > 1 + 1e-12 or count * upper < 1 - 1e-12:
         raise ValueError("bounded normalization constraints are infeasible")
-    result: list[float | None] = [None] * count
-    free = set(range(count))
-    remaining = 1.0
-    while free:
-        scale = remaining / sum(values[index] for index in free)
-        low = [index for index in free if values[index] * scale < lower]
-        high = [index for index in free if values[index] * scale > upper]
-        if not low and not high:
-            for index in free:
-                result[index] = values[index] * scale
-            break
-        for index in low:
-            result[index] = lower
-            remaining -= lower
-            free.remove(index)
-        for index in high:
-            result[index] = upper
-            remaining -= upper
-            free.remove(index)
-    normalized = [float(value) for value in result]
-    normalized[0] += 1.0 - sum(normalized)
+    # Solve sum(clip(c * w_i, lower, upper)) = 1.  The left hand side is
+    # monotone in c, so bisection avoids assigning residual mass to an
+    # arbitrary (sorted-first) item.
+    def total(scale: float) -> float:
+        return sum(min(upper, max(lower, scale * value)) for value in values)
+
+    low_scale = 0.0
+    high_scale = max(1.0, 1.0 / min(values))
+    while total(high_scale) < 1.0:
+        high_scale *= 2.0
+    for _ in range(80):
+        mid = (low_scale + high_scale) / 2.0
+        if total(mid) < 1.0:
+            low_scale = mid
+        else:
+            high_scale = mid
+    normalized = [min(upper, max(lower, high_scale * value)) for value in values]
+    # Only absorb sub-ulp error, and do so proportionally among non-boundary
+    # entries rather than violating a configured bound.
+    residual = 1.0 - sum(normalized)
+    if abs(residual) > 1e-12:
+        free = [
+            index
+            for index, value in enumerate(normalized)
+            if lower + 1e-12 < value < upper - 1e-12
+        ]
+        if not free:
+            raise RuntimeError("bounded normalization failed to resolve residual")
+        share = residual / len(free)
+        for index in free:
+            normalized[index] += share
     return normalized
 
 
