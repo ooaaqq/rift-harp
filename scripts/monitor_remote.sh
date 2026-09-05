@@ -18,24 +18,21 @@ while true; do
   clear
   date
 
-  echo
-  echo "=== GPU ==="
-  nvidia-smi \
-    --query-gpu=temperature.gpu,utilization.gpu,memory.used,memory.reserved,memory.total,power.draw \
-    --format=csv,noheader || true
-
-  echo
-  echo "=== Processes ==="
-  nvidia-smi \
-    --query-compute-apps=pid,process_name,used_memory \
-    --format=csv,noheader || true
-
-  echo
-  echo "=== Training ==="
+  echo "=== Progress ==="
   RUN="$RUN" python - <<'PY'
 import json
 import os
 from pathlib import Path
+
+def readable(value):
+    value = float(value)
+    if value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.3f}B"
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.3f}M"
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}K"
+    return str(int(value))
 
 path = Path(os.environ["RUN"]) / "events.jsonl"
 if not path.exists():
@@ -48,48 +45,36 @@ for line in reversed(path.read_text().splitlines()):
     except json.JSONDecodeError:
         continue
     if event.get("type") == "train":
-        for key in (
-            "global_step",
-            "seen_requested_frames",
-            "seen_valid_frames",
-            "seen_voiced_frames",
-            "loss",
-            "grad_norm",
-            "frames_per_second",
-            "clipped_updates",
-            "lambda_floor_fraction",
-            "q_floor_fraction",
-        ):
-            print(f"{key}: {event.get(key)}")
+        print("step:", f"{event.get('global_step'):,}")
+        print("requested frames:", readable(event.get("seen_requested_frames", 0)))
+        print("valid frames:", readable(event.get("seen_valid_frames", 0)))
         break
 else:
     print("train event: missing")
 PY
 
   echo
-  echo "=== Latest Checkpoints ==="
-  find "$RUN" -maxdepth 1 -name '*.pt' -printf '%T@ %f\n' 2>/dev/null \
-    | sort -rn | head -5 || true
-
-  echo
-  echo "=== Shadow-128 ==="
+  echo "=== Latest Shadow-128 Validation ==="
   if [ -f "$SHADOW" ]; then
     SHADOW="$SHADOW" python - <<'PY'
 import json
 import os
 
+def readable(value):
+    value = float(value)
+    if value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.3f}B"
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.3f}M"
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}K"
+    return str(int(value))
+
 data = json.load(open(os.environ["SHADOW"]))
-print("artifact:", data.get("artifact_type"))
-for model in ("harp_ema_null", "harp_ema_correct"):
-    print(model)
-    for length in ("256", "512", "768"):
-        row = data["models"][model][length]
-        print(
-            length,
-            "mean=", round(row["mean_active_raw_mse"], 6),
-            "median=", round(row["median_active_raw_mse"], 6),
-            "catastrophe=", row["catastrophe_count"],
-        )
+progress = data.get("checkpoint_progress", {})
+print("checkpoint step:", f"{progress.get('global_step', 0):,}")
+print("checkpoint valid frames:", readable(progress.get("seen_valid_frames", 0)))
+print("checkpoint requested frames:", readable(progress.get("seen_requested_frames", 0)))
 PY
   else
     echo "not available"
