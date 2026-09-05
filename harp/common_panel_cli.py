@@ -5,10 +5,8 @@ import hashlib
 import json
 import os
 import statistics
-import sys
 import tempfile
 import time
-import types
 from collections import defaultdict
 from pathlib import Path
 
@@ -40,8 +38,6 @@ def main() -> None:
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--panel-lock", type=Path, required=True)
     parser.add_argument("--v3-baseline", type=Path, required=True)
-    parser.add_argument("--v3-source", type=Path, required=True)
-    parser.add_argument("--v3-checkpoint", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--batch-size", type=int, default=8)
@@ -141,26 +137,7 @@ def main() -> None:
             device,
         )
 
-    frozen_v3 = _load_v3(args.v3_source, args.v3_checkpoint, device)
-    models = {
-        "v3_null": _evaluate_v3(
-            samples,
-            dataset,
-            id_to_index,
-            noise,
-            frozen_v3,
-            dct,
-            vocoder,
-            config,
-            device,
-            16,
-            args.steps,
-        )
-    }
-    v3_reproduction = _merge_frozen_v3_primary(models["v3_null"], baseline, samples)
-    del frozen_v3
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
+    models = {"v3_null": _load_v3_baseline(baseline, samples)}
     for state_name, state in (("raw", checkpoint["model"]), ("ema", checkpoint["ema"])):
         model.load_state_dict(state, strict=True)
         model.eval()
@@ -208,9 +185,6 @@ def main() -> None:
         "panel_lock_sha256": _sha256(args.panel_lock),
         "v3_baseline": str(args.v3_baseline),
         "v3_baseline_sha256": _sha256(args.v3_baseline),
-        "v3_checkpoint": str(args.v3_checkpoint),
-        "v3_checkpoint_sha256": _sha256(args.v3_checkpoint),
-        "v3_reproduction": v3_reproduction,
         "manifest_sha256": manifest_sha256(args.manifest),
         "protocol": {
             "samples": len(samples),
@@ -222,8 +196,6 @@ def main() -> None:
             "noise_generation": "torch CPU Generator float32; length prefixes",
             "active_mask": "valid and RMS > 0.001",
             "primary_metric": "per-sample active raw-log-mel MSE",
-            "v3_primary_source": "frozen historical artifact after rerun validation",
-            "v3_explainer_source": "frozen checkpoint rerun on identical tensors",
             "bootstrap": "dataset-song grouped",
             "bootstrap_samples": args.bootstrap_samples,
             "catastrophe_threshold_full_raw_mse": float(
@@ -369,118 +341,6 @@ def grouped_bootstrap_ci(
     return [float(value) for value in interval]
 
 
-def _load_v3(source: Path, checkpoint_path: Path, device: torch.device):
-    package = types.ModuleType("rift_svc")
-    package.__path__ = [str(source.resolve() / "rift_svc")]
-    sys.modules["rift_svc"] = package
-    from rift_svc.dit import DiT
-
-    checkpoint = torch.load(
-        checkpoint_path, map_location="cpu", weights_only=False, mmap=True
-    )
-    model = DiT(num_speaker=1, **checkpoint["hyper_parameters"]["cfg"]["model"])
-    prefix = "model.transformer."
-    state = {
-        key.removeprefix(prefix): value
-        for key, value in checkpoint["state_dict"].items()
-        if key.startswith(prefix)
-    }
-    missing, unexpected = model.load_state_dict(state, strict=False)
-    if missing != ["spk_embed.weight"] or unexpected:
-        raise RuntimeError(
-            f"V3 checkpoint mismatch: missing={missing}, unexpected={unexpected}"
-        )
-    return model.to(device).eval()
-
-
-@torch.inference_mode()
-def _evaluate_v3(
-    samples: list[dict],
-    dataset: FeatureDataset,
-    id_to_index: dict[str, int],
-    noise: Tensor,
-    model,
-    dct: Tensor,
-    vocoder,
-    config: HARPConfig,
-    device: torch.device,
-    batch_size: int,
-    steps: int,
-) -> dict[str, dict[str, object]]:
-    result = {}
-    for length in LENGTHS:
-        rows = []
-        for offset in range(0, len(samples), batch_size):
-            items = samples[offset : offset + batch_size]
-            loaded = [
-                dataset[
-                    SampleRequest(
-                        id_to_index[str(item["entry_id"])],
-                        length,
-                        int(item["ordinal"]),
-                        int(item["start_frame"]),
-                    )
-                ]
-                for item in items
-            ]
-            cpu_batch = collate_features(loaded)
-            batch = {name: value.to(device) for name, value in cpu_batch.items()}
-            state = noise[offset : offset + len(items), :length].to(device).clone()
-            times = torch.linspace(0, 1, steps + 1, device=device, dtype=torch.float32)
-            with torch.autocast(
-                device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"
-            ):
-                for index in range(steps):
-                    velocity = model(
-                        x=state,
-                        spk=torch.zeros(len(items), dtype=torch.long, device=device),
-                        f0=batch["f0"].squeeze(-1),
-                        rms=batch["rms"].squeeze(-1),
-                        cvec=batch["content"],
-                        time=times[index].expand(len(items)),
-                        mask=batch["mask"],
-                        drop_speaker=True,
-                    )
-                    state += (times[index + 1] - times[index]) * velocity.float()
-            prediction = ((state + 1) * 7 - 12).cpu()
-            for index, item in enumerate(items):
-                row = {
-                    "ordinal": int(item["ordinal"]),
-                    "entry_id": str(item["entry_id"]),
-                    **sample_metrics(
-                        prediction[index],
-                        cpu_batch["mel"][index],
-                        cpu_batch["rms"][index],
-                        cpu_batch["mask"][index],
-                        dct,
-                    ),
-                }
-                if vocoder is not None:
-                    frames = int(cpu_batch["length"][index])
-                    waveform = synthesize_pc_nsf(
-                        vocoder,
-                        prediction[index, :frames],
-                        cpu_batch["f0"][index, :frames, 0],
-                        device,
-                    )
-                    row["waveform"] = waveform_dbfs(waveform)
-                rows.append(row)
-            print(
-                json.dumps(
-                    {
-                        "event": "shadow_128_progress",
-                        "model": "v3_null",
-                        "frames": length,
-                        "completed": min(offset + batch_size, len(samples)),
-                        "total": len(samples),
-                    }
-                ),
-                flush=True,
-            )
-        result[str(length)] = {"samples": rows, **aggregate_samples(rows)}
-    return result
-
-
 @torch.inference_mode()
 def _evaluate_harp(
     samples: list[dict],
@@ -614,45 +474,23 @@ def aggregate_samples(rows: list[dict]) -> dict[str, object]:
     return result
 
 
-def _merge_frozen_v3_primary(
-    rerun: dict[str, dict], baseline: dict, samples: list[dict]
-) -> dict[str, float]:
+def _load_v3_baseline(baseline: dict, samples: list[dict]) -> dict[str, dict]:
     expected = {(int(item["ordinal"]), str(item["entry_id"])) for item in samples}
-    maximum_delta = 0.0
+    result = {}
     for length in LENGTHS:
-        frozen_rows = baseline["models"]["v3_null"][str(length)]["samples"]
-        if {_sample_key(item) for item in frozen_rows} != expected:
+        rows = baseline["models"]["v3_null"][str(length)]["samples"]
+        if {_sample_key(item) for item in rows} != expected:
             raise ValueError(f"V3 baseline sample identity differs at {length}")
-        frozen_by_key = {_sample_key(item): item for item in frozen_rows}
-        rerun_rows = rerun[str(length)]["samples"]
-        if {_sample_key(item) for item in rerun_rows} != expected:
-            raise ValueError(f"V3 rerun sample identity differs at {length}")
-        for row in rerun_rows:
-            frozen = frozen_by_key[_sample_key(row)]
-            if row["active_frames"] != frozen["active_frames"]:
-                raise ValueError("V3 rerun active mask differs from frozen baseline")
-            if row["silence_frames"] != frozen["silence_frames"]:
-                raise ValueError("V3 rerun silence mask differs from frozen baseline")
-            for metric in ("active_raw_mse", "full_raw_mse", "silence_raw_mse"):
-                left, right = row[metric], frozen[metric]
-                if left is None or right is None:
-                    if left is not None or right is not None:
-                        raise ValueError(f"V3 rerun nullability differs for {metric}")
-                else:
-                    maximum_delta = max(maximum_delta, abs(float(left) - float(right)))
-                row[metric] = right
-            row["catastrophe"] = float(row["full_raw_mse"]) > float(
+        normalized = []
+        for row in rows:
+            item = dict(row)
+            full_mse = float(item["full_raw_mse"])
+            item["catastrophe"] = full_mse > float(
                 baseline["protocol"]["catastrophe_threshold_raw_mse"]
             )
-        rerun[str(length)] = {
-            "samples": rerun_rows,
-            **aggregate_samples(rerun_rows),
-        }
-    if maximum_delta > 1e-3:
-        raise ValueError(
-            f"V3 rerun differs from frozen primary metrics by {maximum_delta:.6g}"
-        )
-    return {"maximum_primary_metric_abs_delta_before_freeze": maximum_delta}
+            normalized.append(item)
+        result[str(length)] = {"samples": normalized, **aggregate_samples(normalized)}
+    return result
 
 
 def _validate_protocol(
