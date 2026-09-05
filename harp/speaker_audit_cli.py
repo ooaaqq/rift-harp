@@ -479,8 +479,14 @@ def _aggregate(results: list[dict]) -> dict[str, dict[str, float | int]]:
             if item["state"] == state and item["positive_anchor"]
         ]
         progress = torch.tensor([item["normalized_progress"] for item in selected])
+        total_separation = sum(item["anchor_separation"] for item in selected)
+        weighted_progress = sum(
+            item["normalized_progress"] * item["anchor_separation"]
+            for item in selected
+        ) / total_separation
         output[state] = {
             "positive_anchor_pairs": len(selected),
+            "anchor_separation_weighted_progress": weighted_progress,
             "normalized_progress_mean": float(progress.mean()),
             "normalized_progress_median": float(progress.median()),
             "normalized_progress_p10": float(torch.quantile(progress, 0.1)),

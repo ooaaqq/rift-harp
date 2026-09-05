@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from harp.speaker_audit_cli import normalized_progress, speaker_metrics
+from harp.speaker_audit_cli import _aggregate, normalized_progress, speaker_metrics
 
 
 def test_speaker_metrics_use_target_minus_source_margin() -> None:
@@ -26,3 +26,29 @@ def test_normalized_progress_maps_source_and_target_anchors() -> None:
 def test_normalized_progress_rejects_nonpositive_anchor() -> None:
     with pytest.raises(ValueError, match="positive anchor"):
         normalized_progress(0.0, 0.1, 0.1)
+
+
+def test_aggregate_progress_is_weighted_by_anchor_separation() -> None:
+    results = []
+    for state in ("raw", "ema"):
+        results.extend(
+            [
+                {
+                    "state": state,
+                    "positive_anchor": True,
+                    "normalized_progress": 0.0,
+                    "anchor_separation": 1.0,
+                    "target_margin": 0.0,
+                },
+                {
+                    "state": state,
+                    "positive_anchor": True,
+                    "normalized_progress": 2.0,
+                    "anchor_separation": 3.0,
+                    "target_margin": 1.0,
+                },
+            ]
+        )
+    aggregate = _aggregate(results)
+    assert aggregate["raw"]["anchor_separation_weighted_progress"] == 1.5
+    assert aggregate["ema"]["anchor_separation_weighted_progress"] == 1.5
