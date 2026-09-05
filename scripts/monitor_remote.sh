@@ -12,7 +12,6 @@ ssh -tt \
 set -u
 
 RUN=/root/autodl-tmp/rift-harp/runs/harp-foundation-fp8-v2
-SHADOW=/root/autodl-tmp/rift-harp/runs/harp-shadow-128-1630m.json
 
 while true; do
   printf '\033[2J\033[H'
@@ -55,7 +54,10 @@ PY
 
   echo
   echo "=== Latest Shadow-128 Validation ==="
-  if [ -f "$SHADOW" ]; then
+  SHADOW=$(find /root/autodl-tmp/rift-harp/runs -maxdepth 1 \
+    -type f -name 'harp-shadow-128-*.json' -printf '%T@ %p\n' 2>/dev/null \
+    | sort -rn | head -1 | cut -d' ' -f2-)
+  if [ -n "$SHADOW" ] && [ -f "$SHADOW" ]; then
     SHADOW="$SHADOW" python - <<'PY'
 import json
 import os
