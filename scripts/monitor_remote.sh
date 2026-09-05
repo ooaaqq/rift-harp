@@ -15,7 +15,7 @@ RUN=/root/autodl-tmp/rift-harp/runs/harp-foundation-fp8-v2
 SHADOW=/root/autodl-tmp/rift-harp/runs/harp-shadow-128-1630m.json
 
 while true; do
-  clear
+  printf '\033[2J\033[H'
   date
 
   echo "=== Progress ==="
