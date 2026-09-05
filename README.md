@@ -126,10 +126,22 @@ harp-render-full-panel \
   --pc-nsf-checkout /path/to/SingingVocoders \
   --pc-nsf-lock /path/to/pc_nsf_hifigan.lock.json \
   --vocoder-checkpoint /path/to/pc_nsf_hifigan.ckpt
+
+harp-audit-speaker-progress \
+  --manifest /path/to/training.content.jsonl \
+  --pairs /path/to/pairs.lock.json \
+  --calibration /path/to/speaker-calibration.lock.json \
+  --anchors /path/to/speaker-calibration-anchors.json \
+  --checkpoint /path/to/full.pt \
+  --output /path/to/speaker-progress \
+  --pc-nsf-checkout /path/to/SingingVocoders \
+  --pc-nsf-lock /path/to/pc_nsf_hifigan.lock.json \
+  --vocoder-checkpoint /path/to/pc_nsf_hifigan.ckpt
 ```
 
 The endpoint command covers raw and EMA weights with correct, null, and wrong
 speaker reconstruction, both pooled and split by requested context length. The
 full-panel command renders fixed raw/EMA PC-NSF audio and records pitch and
-waveform-tail diagnostics. A-to-B speaker progress with an external speaker
-encoder remains a separate evaluation integration and is not claimed yet.
+waveform-tail diagnostics. The speaker-progress command renders the locked A-to-B
+conversion panel and measures normalized progress with the pinned WavLM speaker
+encoder and historical source/target anchors.
