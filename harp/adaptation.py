@@ -504,12 +504,12 @@ def finetune(config: HARPConfig, args: argparse.Namespace) -> None:
                     **progress,
                     "loss": float(loss.total.detach()),
                     "original_loss": (
-                        float(loss.flow_by_sample[original_mask].mean())
+                        float(loss.flow_by_sample[original_mask].mean().detach())
                         if bool(original_mask.any())
                         else None
                     ),
                     "pseudo_loss": (
-                        float(loss.flow_by_sample[pseudo_mask].mean())
+                        float(loss.flow_by_sample[pseudo_mask].mean().detach())
                         if bool(pseudo_mask.any())
                         else None
                     ),
