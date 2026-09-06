@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 
 from .config import HARPConfig
@@ -141,10 +142,7 @@ def load_pc_nsf(
     return generator, contract
 
 
-@torch.inference_mode()
-def synthesize_pc_nsf(
-    generator, mel: Tensor, f0: Tensor, device: torch.device
-) -> Tensor:
+def _validate_vocoder_inputs(mel: Tensor, f0: Tensor) -> tuple[Tensor, Tensor]:
     mel = torch.as_tensor(mel).float()
     f0 = torch.as_tensor(f0).float().flatten()
     if mel.ndim != 2:
@@ -157,7 +155,68 @@ def synthesize_pc_nsf(
         raise ValueError("mel or F0 contains non-finite values")
     if bool((f0 < 0).any()) or bool((f0 > 2000).any()):
         raise ValueError("F0 is outside [0, 2000] Hz")
-    waveform = generator(mel.T[None].to(device), f0[None].to(device))
+    return mel, f0
+
+
+def _forward_pc_nsf_with_source(
+    generator, mel: Tensor, harmonic_source: Tensor
+) -> Tensor:
+    """Run the locked mini-NSF generator with a global harmonic source.
+
+    The pinned generator rebuilds its source in ``forward``. Reusing the
+    source generated for the complete F0 track keeps chunk phase continuous
+    without modifying the external vocoder checkout.
+    """
+    if not bool(getattr(generator, "mini_nsf", False)):
+        raise ValueError("global harmonic source requires mini-NSF generator")
+    if harmonic_source.ndim != 3 or harmonic_source.shape[0] != 1:
+        raise ValueError("harmonic_source must have shape [1, 1, samples]")
+    x = generator.conv_pre(mel)
+    noise_sigma = getattr(generator, "noise_sigma", 0.0)
+    if noise_sigma is not None and noise_sigma > 0:
+        x = x + noise_sigma * torch.randn_like(x)
+    for index in range(generator.num_upsamples):
+        x = F.leaky_relu(x, 0.1, inplace=True)
+        x = generator.ups[index](x)
+        if index == 1:
+            x = x + generator.source_conv(harmonic_source)
+        values = None
+        for kernel in range(generator.num_kernels):
+            block = generator.resblocks[index * generator.num_kernels + kernel](x)
+            values = block if values is None else values + block
+        x = values / generator.num_kernels
+    x = F.leaky_relu(x, 0.1, inplace=True)
+    return generator.conv_post(x).tanh()
+
+
+@torch.inference_mode()
+def prepare_pc_nsf_harmonic_source(
+    generator, f0: Tensor, device: torch.device
+) -> Tensor:
+    """Create one phase-continuous mini-NSF excitation for a full F0 track."""
+    f0 = torch.as_tensor(f0).float().flatten()
+    if not torch.isfinite(f0).all() or bool((f0 < 0).any()) or bool((f0 > 2000).any()):
+        raise ValueError("F0 is outside [0, 2000] Hz or contains non-finite values")
+    if not bool(getattr(generator, "mini_nsf", False)):
+        raise ValueError("global harmonic source requires mini-NSF generator")
+    return generator.fastsinegen(f0[None].to(device))
+
+
+@torch.inference_mode()
+def synthesize_pc_nsf(
+    generator,
+    mel: Tensor,
+    f0: Tensor,
+    device: torch.device,
+    harmonic_source: Tensor | None = None,
+) -> Tensor:
+    mel, f0 = _validate_vocoder_inputs(mel, f0)
+    mel = mel.T[None].to(device)
+    f0 = f0[None].to(device)
+    if harmonic_source is None:
+        waveform = generator(mel, f0)
+    else:
+        waveform = _forward_pc_nsf_with_source(generator, mel, harmonic_source)
     waveform = waveform[0, 0].float().cpu()
     if not torch.isfinite(waveform).all():
         raise ValueError("PC-NSF produced a non-finite waveform")

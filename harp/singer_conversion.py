@@ -22,7 +22,11 @@ from .flow_transform import FlowTransform
 from .model import HARPCore
 from .performance import compile_model_in_place, configure_cuda
 from .precision import configure_heavy_linears
-from .vocoder import load_pc_nsf, synthesize_pc_nsf
+from .vocoder import (
+    load_pc_nsf,
+    prepare_pc_nsf_harmonic_source,
+    synthesize_pc_nsf,
+)
 
 
 class FrozenContentEncoder(nn.Module):
@@ -315,9 +319,20 @@ def vocode_chunked(
     *,
     core_frames: int = 1024,
     context_frames: int = 64,
+    overlap_frames: int = 4,
 ) -> Tensor:
-    pieces = []
-    for start in range(0, mel.shape[0], core_frames):
+    """Vocode long tracks with global excitation and waveform overlap-add."""
+    if core_frames <= overlap_frames or overlap_frames < 0:
+        raise ValueError("core_frames must be greater than overlap_frames")
+    frames = mel.shape[0]
+    if frames <= 0:
+        return torch.empty(0)
+    harmonic_source = prepare_pc_nsf_harmonic_source(vocoder, f0, device)
+    stride = core_frames - overlap_frames
+    output = torch.zeros(frames * hop_length)
+    weight_sum = torch.zeros_like(output)
+
+    for start in range(0, frames, stride):
         stop = min(mel.shape[0], start + core_frames)
         visible_start = max(0, start - context_frames)
         visible_stop = min(mel.shape[0], stop + context_frames)
@@ -326,11 +341,26 @@ def vocode_chunked(
             mel[visible_start:visible_stop],
             f0[visible_start:visible_stop],
             device,
+            harmonic_source=harmonic_source[
+                :, :, visible_start * vocoder.upp : visible_stop * vocoder.upp
+            ],
         )
         keep_start = (start - visible_start) * hop_length
         keep_length = (stop - start) * hop_length
-        pieces.append(waveform[keep_start : keep_start + keep_length])
-    return torch.cat(pieces)
+        piece = waveform[keep_start : keep_start + keep_length]
+        weights = torch.ones(keep_length)
+        fade = min(overlap_frames * hop_length, keep_length)
+        if start > 0 and fade:
+            phase = torch.linspace(0, torch.pi / 2, fade)
+            weights[:fade] = phase.sin().square()
+        if stop < frames and fade:
+            phase = torch.linspace(0, torch.pi / 2, fade)
+            weights[-fade:] = phase.cos().square()
+        output[start * hop_length : stop * hop_length] += piece * weights
+        weight_sum[start * hop_length : stop * hop_length] += weights
+    if bool((weight_sum <= 0).any()):
+        raise RuntimeError("vocoder overlap-add left uncovered samples")
+    return output / weight_sum
 
 
 def _sha256(path: Path) -> str:
