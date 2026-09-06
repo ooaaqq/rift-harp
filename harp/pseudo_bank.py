@@ -104,10 +104,13 @@ def build_bank(config: HARPConfig, args: argparse.Namespace) -> None:
     import torchaudio.functional as AF
 
     output = Path(args.output).resolve()
-    if output.exists():
+    bank_path = output / "bank.json"
+    if output.exists() and not args.resume:
         raise FileExistsError("pseudo-bank output directory already exists")
-    (output / "waveforms").mkdir(parents=True)
-    (output / "content").mkdir()
+    if args.resume and not bank_path.is_file():
+        raise FileNotFoundError("resume requires an existing pseudo bank")
+    (output / "waveforms").mkdir(parents=True, exist_ok=args.resume)
+    (output / "content").mkdir(exist_ok=args.resume)
     device = torch.device(args.device)
     configure_cuda(
         device,
@@ -157,12 +160,9 @@ def build_bank(config: HARPConfig, args: argparse.Namespace) -> None:
         and entry.split in set(args.splits)
         and (not args.recording_id or entry.id in set(args.recording_id))
     ]
-    bank = {
+    expected_contract = {
         "artifact_type": "rift_harp_pseudo_content_bank_v1",
-        "teacher_checkpoint": str(parent_path),
         "teacher_checkpoint_sha256": _sha256(parent_path),
-        "teacher_state": "ema",
-        "target_manifest": str(args.manifest),
         "target_manifest_sha256": manifest_sha256(args.manifest),
         "student_target_singer_key": args.student_target,
         "carriers": [
@@ -177,19 +177,35 @@ def build_bank(config: HARPConfig, args: argparse.Namespace) -> None:
             "seed": args.seed,
             "window": {"visible": 768, "core": 384, "overlap": 64},
         },
-        "content_model": str(args.content_model),
         "content_model_sha256": _tree_sha256(args.content_model),
-        "vocoder_checkpoint": str(args.vocoder_checkpoint),
         "vocoder_checkpoint_sha256": _sha256(args.vocoder_checkpoint),
         "feature_contract_sha256": _sha256(config.feature.contract_path),
         "flow_transform_sha256": _sha256(config.flow.transform_path),
-        "vocoder_revision": vocoder_contract.revision,
-        "quality_policy": "accepted_by_flag"
-        if args.accept_generated
-        else "pending_manual_review",
-        "variants": [],
     }
-    _atomic_json(output / "bank.json", bank)
+    if args.resume:
+        bank = json.loads(bank_path.read_text(encoding="utf-8"))
+        for key, value in expected_contract.items():
+            if bank.get(key) != value:
+                raise ValueError(f"resume pseudo-bank contract differs: {key}")
+    else:
+        bank = {
+            **expected_contract,
+            "teacher_checkpoint": str(parent_path),
+            "teacher_state": "ema",
+            "target_manifest": str(args.manifest),
+            "content_model": str(args.content_model),
+            "vocoder_checkpoint": str(args.vocoder_checkpoint),
+            "vocoder_revision": vocoder_contract.revision,
+            "quality_policy": "accepted_by_flag"
+            if args.accept_generated
+            else "pending_manual_review",
+            "variants": [],
+        }
+        _atomic_json(bank_path, bank)
+    completed = {
+        (item["origin_target_recording_id"], item["carrier_speaker_key"])
+        for item in bank["variants"]
+    }
     for entry in entries:
         content, f0, rms, target_mel = _load_target_features(entry, config)
         generator = torch.Generator(device="cpu").manual_seed(
@@ -205,6 +221,8 @@ def build_bank(config: HARPConfig, args: argparse.Namespace) -> None:
             )
         ).hexdigest()
         for carrier in args.carrier_speaker:
+            if (entry.id, carrier) in completed:
+                continue
             token = carrier.replace(":", "-").replace("/", "-")
             waveform_path = output / "waveforms" / f"{entry.id}--{token}.wav"
             content_path = output / "content" / f"{entry.id}--{token}.content.pt"
@@ -268,7 +286,7 @@ def build_bank(config: HARPConfig, args: argparse.Namespace) -> None:
                 "peak": float(waveform.abs().max()),
             }
             bank["variants"].append(item)
-            _atomic_json(output / "bank.json", bank)
+            _atomic_json(bank_path, bank)
             print(json.dumps(item), flush=True)
 
 
@@ -291,6 +309,7 @@ def main() -> None:
     parser.add_argument("--window-batch-size", type=int, default=16)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--accept-generated", action="store_true")
+    parser.add_argument("--resume", action="store_true")
     parser.add_argument("--no-compile", action="store_true")
     args = parser.parse_args()
     build_bank(HARPConfig.load(args.config), args)
