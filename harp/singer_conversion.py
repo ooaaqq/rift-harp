@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -62,9 +63,13 @@ class FrozenContentEncoder(nn.Module):
         if mask_builder is not None:
             hidden_mask = mask_builder(hidden.shape[1], mask.long()).bool()
         else:
-            hidden_mask = F.interpolate(
-                mask.float().unsqueeze(1), size=hidden.shape[1], mode="nearest"
-            ).squeeze(1).bool()
+            hidden_mask = (
+                F.interpolate(
+                    mask.float().unsqueeze(1), size=hidden.shape[1], mode="nearest"
+                )
+                .squeeze(1)
+                .bool()
+            )
         return hidden, hidden_mask
 
 
@@ -160,9 +165,7 @@ def extract_features(
     if frames <= 0:
         raise ValueError("input is shorter than one HARP frame")
 
-    content_waveform = AF.resample(
-        waveform, config.feature.sample_rate, 16_000
-    )
+    content_waveform = AF.resample(waveform, config.feature.sample_rate, 16_000)
     encoder = FrozenContentEncoder.load(content_model, config.model.content_dim)
     encoder.to(device).eval()
     content = encode_content(encoder, content_waveform, 16_000, device)
@@ -228,8 +231,9 @@ def render_mel(
     f0: Tensor,
     rms: Tensor,
     noise: Tensor,
-    speaker_code: Tensor,
-    speaker_offsets: Tensor,
+    speaker_id: int,
+    speaker_code: Tensor | None,
+    speaker_offsets: Tensor | None,
     device: torch.device,
     *,
     visible: int,
@@ -277,13 +281,15 @@ def render_mel(
             batch["content"],
             batch["f0"],
             batch["rms"],
-            torch.zeros(len(selected), dtype=torch.long, device=device),
+            torch.full((len(selected),), speaker_id, dtype=torch.long, device=device),
             batch["mask"],
             steps=steps,
             method="euler",
             guidance_strength=guidance_strength,
             initial_noise=batch["noise"],
-            speaker_code_override=speaker_code.expand(len(selected), -1),
+            speaker_code_override=(
+                None if speaker_code is None else speaker_code.expand(len(selected), -1)
+            ),
             speaker_offsets=speaker_offsets,
         ).cpu()
         for index, start in enumerate(selected):
@@ -337,11 +343,33 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _resolve_foundation_speakers(
+    requested: list[str], speaker_to_id: dict[str, int]
+) -> list[tuple[str, int]]:
+    missing = [speaker for speaker in requested if speaker not in speaker_to_id]
+    if missing:
+        available = ", ".join(sorted(speaker_to_id))
+        raise ValueError(
+            f"unknown foundation speaker(s): {', '.join(missing)}; "
+            f"available speakers: {available}"
+        )
+    if len(set(requested)) != len(requested):
+        raise ValueError("foundation speakers must be unique")
+    return [(speaker, int(speaker_to_id[speaker])) for speaker in requested]
+
+
+def _filename_component(value: str) -> str:
+    component = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-.")
+    return component or "speaker"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path("configs/foundation.json"))
     parser.add_argument("--parent", type=Path, required=True)
-    parser.add_argument("--adapter", type=Path, action="append", required=True)
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("--adapter", type=Path, action="append")
+    target.add_argument("--foundation-speaker", action="append")
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--content-model", type=Path, required=True)
@@ -372,9 +400,9 @@ def main() -> None:
     transform = FlowTransform.load(config.flow.transform_path).to(device)
     feature = FeatureContract.load(config.feature.contract_path)
     validate_feature_contract(feature, config.model, config.harmonic, config.feature)
-    model = HARPCore(
-        config.model, config.harmonic, feature, config.num_speakers
-    ).to(device)
+    model = HARPCore(config.model, config.harmonic, feature, config.num_speakers).to(
+        device
+    )
     configure_heavy_linears(model, config.model.heavy_linear_precision)
     model.load_state_dict(parent["ema"], strict=True)
     model.eval()
@@ -412,63 +440,115 @@ def main() -> None:
     )
     results = []
     started = time.time()
-    for adapter_path in args.adapter:
-        adapter = torch.load(adapter_path, map_location="cpu", weights_only=False)
-        for state in args.states:
-            values = adapter["adapter"] if state == "raw" else adapter["ema"]
-            code = torch.as_tensor(values["code"]).float().to(device)[None]
-            offsets = torch.as_tensor(values["offsets"]).float().to(device)
-            for guidance in args.guidance:
-                mel = render_mel(
-                    system,
-                    content,
-                    f0,
-                    rms,
-                    noise,
-                    code,
-                    offsets,
-                    device,
-                    visible=768,
-                    core=384,
-                    overlap=64,
-                    batch_size=args.window_batch_size,
-                    steps=args.steps,
-                    guidance_strength=guidance,
+    if args.foundation_speaker:
+        targets = [
+            {
+                "mode": "foundation",
+                "name": name,
+                "speaker_id": speaker_id,
+                "state": "ema",
+                "code": None,
+                "offsets": None,
+            }
+            for name, speaker_id in _resolve_foundation_speakers(
+                args.foundation_speaker, parent["speaker_to_id"]
+            )
+        ]
+    else:
+        targets = []
+        for adapter_path in args.adapter:
+            adapter = torch.load(adapter_path, map_location="cpu", weights_only=False)
+            for state in args.states:
+                values = adapter["adapter"] if state == "raw" else adapter["ema"]
+                targets.append(
+                    {
+                        "mode": "adapter",
+                        "name": adapter_path.stem,
+                        "speaker_id": 0,
+                        "state": state,
+                        "code": torch.as_tensor(values["code"])
+                        .float()
+                        .to(device)[None],
+                        "offsets": torch.as_tensor(values["offsets"])
+                        .float()
+                        .to(device),
+                        "adapter": adapter,
+                        "adapter_path": adapter_path,
+                    }
                 )
-                converted = vocode_chunked(
-                    vocoder, mel, f0, device, config.feature.hop_length
-                )
-                converted = F.pad(
-                    converted, (0, max(0, expected_samples - converted.numel()))
-                )
-                converted = converted[:expected_samples]
-                frames = int(adapter["seen_target_valid_frames"])
-                guidance_name = str(guidance).replace(".", "p")
+    for target_spec in targets:
+        for guidance in args.guidance:
+            mel = render_mel(
+                system,
+                content,
+                f0,
+                rms,
+                noise,
+                target_spec["speaker_id"],
+                target_spec["code"],
+                target_spec["offsets"],
+                device,
+                visible=768,
+                core=384,
+                overlap=64,
+                batch_size=args.window_batch_size,
+                steps=args.steps,
+                guidance_strength=guidance,
+            )
+            converted = vocode_chunked(
+                vocoder, mel, f0, device, config.feature.hop_length
+            )
+            converted = F.pad(
+                converted, (0, max(0, expected_samples - converted.numel()))
+            )
+            converted = converted[:expected_samples]
+            guidance_name = str(guidance).replace(".", "p")
+            if target_spec["mode"] == "foundation":
                 filename = (
-                    f"stage-a-{frames / 1_000_000:.3f}M-{state}"
+                    f"foundation-{_filename_component(target_spec['name'])}"
                     f"-guidance-{guidance_name}.wav"
                 )
-                sf.write(
-                    args.output / filename,
-                    converted.numpy(),
-                    config.feature.sample_rate,
-                    subtype="PCM_24",
+                result = {
+                    "target_mode": "foundation",
+                    "foundation_speaker": target_spec["name"],
+                    "speaker_id": target_spec["speaker_id"],
+                    "foundation_state": "ema",
+                }
+            else:
+                adapter = target_spec["adapter"]
+                adapter_path = target_spec["adapter_path"]
+                frames = int(adapter["seen_target_valid_frames"])
+                filename = (
+                    f"stage-a-{frames / 1_000_000:.3f}M-{target_spec['state']}"
+                    f"-guidance-{guidance_name}.wav"
                 )
                 result = {
+                    "target_mode": "adapter",
                     "adapter": str(adapter_path),
                     "adapter_sha256": _sha256(adapter_path),
-                    "state": state,
+                    "state": target_spec["state"],
                     "step": int(adapter["step"]),
                     "seen_target_valid_frames": frames,
+                }
+            sf.write(
+                args.output / filename,
+                converted.numpy(),
+                config.feature.sample_rate,
+                subtype="PCM_24",
+            )
+            result.update(
+                {
                     "guidance_strength": guidance,
                     "output": filename,
                     "output_sha256": _sha256(args.output / filename),
                     "peak": float(converted.abs().max()),
                 }
-                results.append(result)
-                print(json.dumps(result), flush=True)
+            )
+            results.append(result)
+            print(json.dumps(result), flush=True)
     manifest = {
-        "artifact_type": "rift_harp_singer_conversion_v1",
+        "artifact_type": "rift_harp_singer_conversion_v2",
+        "target_mode": "foundation" if args.foundation_speaker else "adapter",
         "input": str(args.input),
         "input_sha256": _sha256(args.input),
         "parent": str(args.parent),
