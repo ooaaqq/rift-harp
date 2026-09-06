@@ -146,39 +146,46 @@ waveform-tail diagnostics. The speaker-progress command renders the locked A-to-
 conversion panel and measures normalized progress with the pinned WavLM speaker
 encoder and historical source/target anchors.
 
-## Singer Adaptation
+## Target Singer Finetuning
 
-Singer adaptation keeps the foundation EMA and all shared model weights frozen.
-Stage A learns one 256-dimensional target speaker code. Stage B starts from the
-EMA adapter from A and learns only the 17 target-specific AdaLN offsets. The
-adapter checkpoint is bound to the exact parent foundation checkpoint.
+The target-specific path trains HARP on real target mel/F0/RMS while mixing the
+original ContentVec input with ContentVec re-extracted from frozen-foundation
+speaker conversions. Pseudo variants remain children of their real target
+recording and never become independent training targets.
 
-Run stage A on a target-singer manifest (accepted `train` entries):
+First build an offline pseudo-content bank. Generated variants default to
+`pending`; pass `--accept-generated` only after checking that the chosen carrier
+speakers preserve lyrics, timing, and synthesis quality.
+
+```bash
+harp-build-pseudo-bank \
+  --manifest /path/to/target-manifest.jsonl \
+  --parent /path/to/foundation.pt \
+  --carrier-speaker OpenSinger:female-35 \
+  --carrier-speaker OpenSinger:male-08 \
+  --carrier-speaker Opencpop:opencpop \
+  --content-model /path/to/contentvec \
+  --pc-nsf-checkout /path/to/SingingVocoders \
+  --pc-nsf-lock /path/to/pc_nsf.lock.json \
+  --vocoder-checkpoint /path/to/pc_nsf.ckpt \
+  --output /path/to/pseudo-bank
+```
+
+Then initialize from the same foundation EMA and train the complete acoustic
+model except the foundation speaker table and four branch-mix scalars:
 
 ```bash
 harp-adapt-singer \
-  --config configs/foundation.json \
-  --manifest /path/to/singer-manifest.jsonl \
-  --parent /path/to/foundation-full-or-audit.pt \
-  --output /path/to/singer-adapt-a \
-  --stage a \
-  --valid-frames 12000000
+  --manifest /path/to/target-manifest.jsonl \
+  --pseudo-bank /path/to/pseudo-bank/bank.json \
+  --parent /path/to/foundation.pt \
+  --output /path/to/singer-finetune \
+  --valid-frames 100000000
 ```
 
-Run stage B from the selected stage-A adapter; it loads the stage-A EMA by
-default:
-
-```bash
-harp-adapt-singer \
-  --config configs/foundation.json \
-  --manifest /path/to/singer-manifest.jsonl \
-  --parent /path/to/foundation-full-or-audit.pt \
-  --init-adapter /path/to/singer-adapt-a/adapter-a-step-*.pt \
-  --output /path/to/singer-adapt-b \
-  --stage b \
-  --valid-frames 36000000
-```
-
-Use a song/recording-disjoint `dev` split and the fixed Euler32 external
-conversion panel to select checkpoints. The adaptation CLI deliberately does
-not alter the foundation transform, frontend, null row, or optimizer state.
+The default recipe uses 30% original and 70% pseudo content, a `2e-5` model LR,
+a `1e-4` target-code LR, 2M-frame warmup and EMA half-life, and 12,288 requested
+frames per update. Full checkpoints contain matching raw/EMA model and target
+code states. Select them with fixed real-source Euler32 conversions at guidance
+1.0; target reconstruction is a safety diagnostic rather than the product
+criterion.

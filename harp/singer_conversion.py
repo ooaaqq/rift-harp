@@ -1,4 +1,4 @@
-"""Offline whole-song conversion with a frozen foundation singer adapter."""
+"""Offline conversion with a foundation speaker or target finetune."""
 
 from __future__ import annotations
 
@@ -233,7 +233,6 @@ def render_mel(
     noise: Tensor,
     speaker_id: int,
     speaker_code: Tensor | None,
-    speaker_offsets: Tensor | None,
     device: torch.device,
     *,
     visible: int,
@@ -290,7 +289,6 @@ def render_mel(
             speaker_code_override=(
                 None if speaker_code is None else speaker_code.expand(len(selected), -1)
             ),
-            speaker_offsets=speaker_offsets,
         ).cpu()
         for index, start in enumerate(selected):
             stop = min(frames, start + core)
@@ -368,7 +366,7 @@ def main() -> None:
     parser.add_argument("--config", type=Path, default=Path("configs/foundation.json"))
     parser.add_argument("--parent", type=Path, required=True)
     target = parser.add_mutually_exclusive_group(required=True)
-    target.add_argument("--adapter", type=Path, action="append")
+    target.add_argument("--finetune", type=Path, action="append")
     target.add_argument("--foundation-speaker", action="append")
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -448,7 +446,7 @@ def main() -> None:
                 "speaker_id": speaker_id,
                 "state": "ema",
                 "code": None,
-                "offsets": None,
+                "model_state": parent["ema"],
             }
             for name, speaker_id in _resolve_foundation_speakers(
                 args.foundation_speaker, parent["speaker_to_id"]
@@ -456,27 +454,39 @@ def main() -> None:
         ]
     else:
         targets = []
-        for adapter_path in args.adapter:
-            adapter = torch.load(adapter_path, map_location="cpu", weights_only=False)
+        parent_sha256 = _sha256(args.parent)
+        for finetune_path in args.finetune:
+            finetune = torch.load(
+                finetune_path, map_location="cpu", weights_only=False, mmap=True
+            )
+            if finetune.get("checkpoint_type") not in {
+                "singer_finetune_audit_v1",
+                "singer_finetune_full_v1",
+            }:
+                raise ValueError("--finetune must be a singer finetune checkpoint")
+            if finetune["run"].get("parent_checkpoint_sha256") != parent_sha256:
+                raise ValueError("finetune checkpoint belongs to another parent")
             for state in args.states:
-                values = adapter["adapter"] if state == "raw" else adapter["ema"]
                 targets.append(
                     {
-                        "mode": "adapter",
-                        "name": adapter_path.stem,
+                        "mode": "finetune",
+                        "name": finetune_path.stem,
                         "speaker_id": 0,
                         "state": state,
-                        "code": torch.as_tensor(values["code"])
+                        "code": torch.as_tensor(
+                            finetune[
+                                "target_code" if state == "raw" else "target_code_ema"
+                            ]
+                        )
                         .float()
                         .to(device)[None],
-                        "offsets": torch.as_tensor(values["offsets"])
-                        .float()
-                        .to(device),
-                        "adapter": adapter,
-                        "adapter_path": adapter_path,
+                        "model_state": finetune["model" if state == "raw" else "ema"],
+                        "finetune": finetune,
+                        "finetune_path": finetune_path,
                     }
                 )
     for target_spec in targets:
+        model.load_state_dict(target_spec["model_state"], strict=True)
         for guidance in args.guidance:
             mel = render_mel(
                 system,
@@ -486,7 +496,6 @@ def main() -> None:
                 noise,
                 target_spec["speaker_id"],
                 target_spec["code"],
-                target_spec["offsets"],
                 device,
                 visible=768,
                 core=384,
@@ -515,19 +524,19 @@ def main() -> None:
                     "foundation_state": "ema",
                 }
             else:
-                adapter = target_spec["adapter"]
-                adapter_path = target_spec["adapter_path"]
-                frames = int(adapter["seen_target_valid_frames"])
+                finetune = target_spec["finetune"]
+                finetune_path = target_spec["finetune_path"]
+                frames = int(finetune["progress"]["seen_target_valid_frames"])
                 filename = (
-                    f"stage-a-{frames / 1_000_000:.3f}M-{target_spec['state']}"
+                    f"finetune-{frames / 1_000_000:.3f}M-{target_spec['state']}"
                     f"-guidance-{guidance_name}.wav"
                 )
                 result = {
-                    "target_mode": "adapter",
-                    "adapter": str(adapter_path),
-                    "adapter_sha256": _sha256(adapter_path),
+                    "target_mode": "finetune",
+                    "finetune": str(finetune_path),
+                    "finetune_sha256": _sha256(finetune_path),
                     "state": target_spec["state"],
-                    "step": int(adapter["step"]),
+                    "step": int(finetune["progress"]["global_step"]),
                     "seen_target_valid_frames": frames,
                 }
             sf.write(
@@ -548,7 +557,7 @@ def main() -> None:
             print(json.dumps(result), flush=True)
     manifest = {
         "artifact_type": "rift_harp_singer_conversion_v2",
-        "target_mode": "foundation" if args.foundation_speaker else "adapter",
+        "target_mode": "foundation" if args.foundation_speaker else "finetune",
         "input": str(args.input),
         "input_sha256": _sha256(args.input),
         "parent": str(args.parent),

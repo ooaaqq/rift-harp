@@ -23,6 +23,7 @@ def full_precision_matmul(left: Tensor, right: Tensor) -> Tensor:
     finally:
         torch.backends.cuda.matmul.allow_tf32 = previous
 
+
 ALPHA_CANDIDATES = (0.5, 0.625, 0.75, 0.875, 1.0)
 GAIN_CAP = 4.0
 

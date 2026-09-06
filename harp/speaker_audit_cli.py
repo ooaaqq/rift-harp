@@ -193,9 +193,13 @@ class WavLMSpeakerEncoder:
         self.extractor = AutoFeatureExtractor.from_pretrained(
             WAVLM_REPOSITORY, revision=WAVLM_REVISION, local_files_only=True
         )
-        self.model = WavLMForXVector.from_pretrained(
-            WAVLM_REPOSITORY, revision=WAVLM_REVISION, local_files_only=True
-        ).to(device).eval()
+        self.model = (
+            WavLMForXVector.from_pretrained(
+                WAVLM_REPOSITORY, revision=WAVLM_REVISION, local_files_only=True
+            )
+            .to(device)
+            .eval()
+        )
 
     @torch.inference_mode()
     def encode(self, waveforms: list[Tensor], source_rate: int) -> Tensor:
@@ -337,9 +341,7 @@ def _reference_metrics(
             *pair["target_references"],
             calibration[pair_index]["target_ground_truth"],
         ]
-        waveforms = [
-            _locked_reference(spec, manifest, config) for spec in specs
-        ]
+        waveforms = [_locked_reference(spec, manifest, config) for spec in specs]
         embeddings = encoder.encode(waveforms, config.feature.sample_rate)
         source_prototype = F.normalize(embeddings[1:3].mean(0), dim=0)
         target_prototype = F.normalize(embeddings[3:5].mean(0), dim=0)
@@ -480,10 +482,13 @@ def _aggregate(results: list[dict]) -> dict[str, dict[str, float | int]]:
         ]
         progress = torch.tensor([item["normalized_progress"] for item in selected])
         total_separation = sum(item["anchor_separation"] for item in selected)
-        weighted_progress = sum(
-            item["normalized_progress"] * item["anchor_separation"]
-            for item in selected
-        ) / total_separation
+        weighted_progress = (
+            sum(
+                item["normalized_progress"] * item["anchor_separation"]
+                for item in selected
+            )
+            / total_separation
+        )
         output[state] = {
             "positive_anchor_pairs": len(selected),
             "anchor_separation_weighted_progress": weighted_progress,

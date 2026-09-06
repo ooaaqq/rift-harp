@@ -108,12 +108,9 @@ class LowRankModulation(nn.Module):
         self,
         time_code: Tensor,
         speaker_code: Tensor,
-        speaker_offset: Tensor | None = None,
     ) -> Tensor:
         time_low = self.time_projection(time_code)
         speaker_low = self.speaker_projection(speaker_code)
-        if speaker_offset is not None:
-            speaker_low = speaker_low + speaker_offset
         mixed = torch.cat((time_low, speaker_low, time_low * speaker_low), dim=-1)
         return self.output(F.silu(self.mixer(mixed)))[:, None, :]
 
@@ -140,10 +137,9 @@ class AdaLNBlock(nn.Module):
         time_code: Tensor,
         speaker_code: Tensor,
         mask: Tensor | None,
-        speaker_offset: Tensor | None = None,
     ) -> Tensor:
         shift_a, scale_a, gate_a, shift_f, scale_f, gate_f = self.modulation(
-            time_code, speaker_code, speaker_offset
+            time_code, speaker_code
         ).chunk(6, dim=-1)
         attended = self.attention(_modulate(self.norm1(x), shift_a, scale_a), mask)
         x = x + gate_a * attended
@@ -273,7 +269,6 @@ class HARPCore(nn.Module):
         timestep: Tensor,
         mask: Tensor | None = None,
         speaker_code_override: Tensor | None = None,
-        speaker_offsets: Tensor | None = None,
     ) -> Tensor:
         voiced = torch.isfinite(f0) & (f0 > 0)
         harmonic = self.harmonic_input(harmonic_map.flatten(-2))
@@ -303,10 +298,6 @@ class HARPCore(nn.Module):
         )
         if speaker_code.ndim == 1:
             speaker_code = speaker_code.unsqueeze(0).expand(speaker.shape[0], -1)
-        if speaker_offsets is not None:
-            expected = (len(self.blocks) + 1, self.config.adaln_rank)
-            if speaker_offsets.shape != expected:
-                raise ValueError(f"speaker_offsets must have shape {expected}")
         for index, block in enumerate(self.blocks, start=1):
             if str(index) in self.harmonic_adapters:
                 x = x + self.harmonic_adapters[str(index)](harmonic)
@@ -321,7 +312,6 @@ class HARPCore(nn.Module):
                     time_code,
                     speaker_code,
                     mask,
-                    speaker_offsets[index - 1] if speaker_offsets is not None else None,
                     use_reentrant=False,
                     context_fn=_selective_checkpoint_contexts,
                 )
@@ -331,13 +321,8 @@ class HARPCore(nn.Module):
                     time_code,
                     speaker_code,
                     mask,
-                    speaker_offsets[index - 1] if speaker_offsets is not None else None,
                 )
-        shift, scale = self.final_modulation(
-            time_code,
-            speaker_code,
-            speaker_offsets[-1] if speaker_offsets is not None else None,
-        ).chunk(2, dim=-1)
+        shift, scale = self.final_modulation(time_code, speaker_code).chunk(2, dim=-1)
         return _masked(self.output(_modulate(self.final_norm(x), shift, scale)), mask)
 
     def prepare_harmonic(self, f0: Tensor) -> Tensor:

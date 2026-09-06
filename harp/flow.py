@@ -81,7 +81,6 @@ class HARPFlow(nn.Module):
         batch: dict[str, Tensor],
         *,
         speaker_code_override: Tensor | None = None,
-        speaker_offsets: Tensor | None = None,
     ) -> FlowLoss:
         raw_mel = batch["mel"].float()
         target = self.transform.transform(raw_mel)
@@ -131,7 +130,6 @@ class HARPFlow(nn.Module):
         residual = self._model_residual(
             *model_inputs,
             speaker_code_override=speaker_code_override,
-            speaker_offsets=speaker_offsets,
         )
         weights = mask.unsqueeze(-1).float()
         squared = (residual - residual_target).square() * weights
@@ -161,7 +159,6 @@ class HARPFlow(nn.Module):
         generator: torch.Generator | None = None,
         initial_noise: Tensor | None = None,
         speaker_code_override: Tensor | None = None,
-        speaker_offsets: Tensor | None = None,
     ) -> Tensor:
         if steps <= 0 or method not in {"euler", "heun"}:
             raise ValueError("invalid ODE sampler configuration")
@@ -197,7 +194,6 @@ class HARPFlow(nn.Module):
                 mask,
                 guidance_strength,
                 speaker_code_override,
-                speaker_offsets,
             )
             proposal = state + delta * velocity
             if method == "heun" and index + 1 < steps:
@@ -213,7 +209,6 @@ class HARPFlow(nn.Module):
                     mask,
                     guidance_strength,
                     speaker_code_override,
-                    speaker_offsets,
                 )
                 state = state + delta * 0.5 * (velocity + next_velocity)
             else:
@@ -233,7 +228,6 @@ class HARPFlow(nn.Module):
         mask: Tensor,
         strength: float,
         speaker_code_override: Tensor | None = None,
-        speaker_offsets: Tensor | None = None,
     ) -> Tensor:
         coefficients = flow_coefficients(
             timestep,
@@ -252,7 +246,6 @@ class HARPFlow(nn.Module):
             timestep,
             mask,
             speaker_code_override=speaker_code_override,
-            speaker_offsets=speaker_offsets,
         )
         if strength == 1.0:
             residual = conditional
@@ -268,7 +261,6 @@ class HARPFlow(nn.Module):
                 timestep,
                 mask,
                 speaker_code_override=None,
-                speaker_offsets=None,
             )
             residual = unconditional + strength * (conditional - unconditional)
         return coefficients.c_skip * state + coefficients.c_out * residual
@@ -277,7 +269,6 @@ class HARPFlow(nn.Module):
         self,
         *args: Tensor,
         speaker_code_override: Tensor | None = None,
-        speaker_offsets: Tensor | None = None,
     ) -> Tensor:
         device_type = next(self.model.parameters()).device.type
         with torch.autocast(
@@ -288,7 +279,6 @@ class HARPFlow(nn.Module):
             return self.model(
                 *args,
                 speaker_code_override=speaker_code_override,
-                speaker_offsets=speaker_offsets,
             ).float()
 
 

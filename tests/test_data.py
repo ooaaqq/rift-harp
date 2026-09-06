@@ -21,6 +21,8 @@ def test_bounded_normalize_respects_bounds_without_order_bias() -> None:
     assert second == pytest.approx([1 / 6, 0.5, 1 / 6, 1 / 6])
     assert sum(first) == pytest.approx(1.0)
     assert all(0.125 <= value <= 0.5 for value in first)
+
+
 def _entry(tmp_path: Path, index: int, dataset: str, speaker: str) -> ManifestEntry:
     prefix = tmp_path / f"features-{index}"
     frames = 20 + index

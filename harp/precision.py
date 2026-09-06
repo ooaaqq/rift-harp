@@ -27,9 +27,7 @@ def heavy_linear_names(model: nn.Module) -> tuple[str, ...]:
     )
 
 
-def configure_heavy_linears(
-    model: HARPCore, precision: str
-) -> dict[str, object]:
+def configure_heavy_linears(model: HARPCore, precision: str) -> dict[str, object]:
     if precision != "float8_rowwise":
         raise ValueError(f"unsupported heavy Linear precision: {precision}")
     expected_names = heavy_linear_names(model)
@@ -65,9 +63,7 @@ def configure_heavy_linears(
     convert_to_float8_training(
         model,
         module_filter_fn=lambda _module, fqn: fqn in selected,
-        config=Float8LinearConfig.from_recipe_name(
-            Float8LinearRecipeName.ROWWISE
-        ),
+        config=Float8LinearConfig.from_recipe_name(Float8LinearRecipeName.ROWWISE),
     )
     converted = tuple(
         name

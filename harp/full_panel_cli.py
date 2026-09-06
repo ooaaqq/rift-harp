@@ -249,9 +249,7 @@ def _render(
                         "noise_seed": int(item["noise_seed"]),
                         "generated": generated_name,
                         "reference": reference_name,
-                        "reference_source_sample_rate": reference_rates[
-                            reference_name
-                        ],
+                        "reference_source_sample_rate": reference_rates[reference_name],
                         "pitch": pitch_metrics(target_f0, generated_f0),
                         "tail": tail_metrics(
                             waveform,

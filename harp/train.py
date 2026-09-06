@@ -150,9 +150,7 @@ def train(config: HARPConfig, entries: list, args: argparse.Namespace) -> None:
     model = HARPCore(
         config.model, config.harmonic, feature_contract, config.num_speakers
     ).to(device)
-    runtime.update(
-        configure_heavy_linears(model, config.model.heavy_linear_precision)
-    )
+    runtime.update(configure_heavy_linears(model, config.model.heavy_linear_precision))
     compiler_cache_artifact = getattr(args, "compiler_cache_artifact", None)
     if compiler_cache_artifact is not None:
         runtime.update(load_compiler_cache_artifact(compiler_cache_artifact))

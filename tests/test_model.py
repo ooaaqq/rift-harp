@@ -1,6 +1,5 @@
 import torch
 
-from harp.adaptation import SingerAdapter
 from harp.config import HarmonicConfig, ModelConfig, OptimizerConfig
 from harp.feature_contract import neutral_feature_contract
 from harp.model import _EXPENSIVE_OPS, HARPCore, _magnitude_preserving_concat
@@ -123,12 +122,8 @@ def test_state_projection_has_unit_scale_semantic_initialization() -> None:
     torch.testing.assert_close(output_rms, torch.tensor(1.0), atol=0.08, rtol=0)
 
 
-def test_singer_adapter_stages_and_zero_offsets_preserve_model_output() -> None:
+def test_speaker_code_override_matches_direct_speaker_route() -> None:
     model = _small_model()
-    adapter = SingerAdapter(model)
-    assert adapter.parameter_count == 32 + (4 + 1) * 8
-    adapter.stage("a")
-    assert adapter.code.requires_grad and not adapter.offsets.requires_grad
     f0 = torch.rand(2, 9, 1) * 500 + 80
     inputs = (
         torch.randn(2, 9, 8),
@@ -144,21 +139,12 @@ def test_singer_adapter_stages_and_zero_offsets_preserve_model_output() -> None:
     for block in model.blocks:
         block.modulation.output.weight.data.normal_()
     model.final_modulation.output.weight.data.normal_()
-    adapter.code.data.copy_(model.speaker.weight[0])
     baseline = model(*inputs)
-    for parameter in model.parameters():
-        parameter.requires_grad_(False)
-    adapted = model(
+    overridden = model(
         *inputs,
-        speaker_code_override=adapter.code,
-        speaker_offsets=adapter.offsets,
+        speaker_code_override=model.speaker.weight[0].detach(),
     )
-    torch.testing.assert_close(adapted, baseline)
-    adapted.square().mean().backward()
-    assert adapter.code.grad is not None and adapter.code.grad.count_nonzero() > 0
-    assert all(parameter.grad is None for parameter in model.parameters())
-    adapter.stage("b")
-    assert not adapter.code.requires_grad and adapter.offsets.requires_grad
+    torch.testing.assert_close(overridden, baseline)
 
 
 def test_selective_recompute_matches_eager_forward_and_gradients() -> None:

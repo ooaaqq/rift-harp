@@ -23,6 +23,8 @@ class SampleRequest:
     frames: int
     seed: int
     start: int | None = None
+    content_feature_path: str | None = None
+    is_pseudo: bool = False
 
 
 def bounded_normalize(
@@ -34,6 +36,7 @@ def bounded_normalize(
         raise ValueError("bounded normalization requires finite positive weights")
     if count * lower > 1 + 1e-12 or count * upper < 1 - 1e-12:
         raise ValueError("bounded normalization constraints are infeasible")
+
     # Solve sum(clip(c * w_i, lower, upper)) = 1.  The left hand side is
     # monotone in c, so bisection avoids assigning residual mass to an
     # arbitrary (sorted-first) item.
@@ -96,7 +99,7 @@ class FeatureDataset(Dataset[dict[str, Tensor]]):
         if isinstance(request, int):
             request = SampleRequest(request, self.entries[request].frames, request)
         entry = self.entries[request.index]
-        features = self._load(entry)
+        features = self._load(entry, request.content_feature_path)
         available = features["mel"].shape[0]
         wanted = min(request.frames, available)
         rng = random.Random(request.seed)
@@ -127,9 +130,12 @@ class FeatureDataset(Dataset[dict[str, Tensor]]):
             "requested_length": torch.tensor(request.frames),
             "entry_index": torch.tensor(request.index),
             "crop_start": torch.tensor(start),
+            "is_pseudo": torch.tensor(request.is_pseudo),
         }
 
-    def _load(self, entry: ManifestEntry) -> dict[str, Tensor]:
+    def _load(
+        self, entry: ManifestEntry, content_feature_path: str | None = None
+    ) -> dict[str, Tensor]:
         prefix = Path(entry.feature_prefix)
         mel = _matrix(
             torch.load(f"{prefix}.mel.pt", map_location="cpu", weights_only=True),
@@ -159,7 +165,11 @@ class FeatureDataset(Dataset[dict[str, Tensor]]):
         if bool(torch.isinf(result["f0"]).any()):
             raise ValueError(f"{entry.id}: F0 contains infinite values")
         if not self.mel_only:
-            content_path = entry.content_feature_path or f"{prefix}.content.pt"
+            content_path = (
+                content_feature_path
+                or entry.content_feature_path
+                or f"{prefix}.content.pt"
+            )
             content = _matrix(
                 torch.load(content_path, map_location="cpu", weights_only=True),
                 self.content_dim,
@@ -432,6 +442,7 @@ def collate_features(samples: Sequence[dict[str, Tensor]]) -> dict[str, Tensor]:
             "entry_index",
             "crop_start",
             "noise_seed",
+            "is_pseudo",
         }:
             result[name] = torch.stack([sample[name] for sample in samples])
         else:
