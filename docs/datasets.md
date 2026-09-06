@@ -2,14 +2,15 @@
 
 The foundation model used the following singing datasets.
 
-| Dataset | Sampling | Source and terms |
-| --- | ---: | --- |
-| OpenSinger | 43.5% | [Project](https://github.com/Multi-Singer/Multi-Singer.github.io) |
-| GTSinger | 32% | [Dataset](https://huggingface.co/datasets/AaronZ345/GTSinger), [license](https://github.com/AaronZ345/GTSinger/blob/master/dataset_license.md) |
-| M4Singer | 20% | [Project](https://github.com/M4Singer/M4Singer), [license](https://github.com/M4Singer/M4Singer/blob/master/dataset_license.md) |
-| ACE-Opencpop | 2% | [Dataset](https://huggingface.co/datasets/espnet/ace-opencpop-segments), [paper](https://arxiv.org/abs/2401.17619) |
-| Opencpop | 1.5% | [Project](https://wenet-e2e.github.io/opencpop/), [dataset](https://modelscope.cn/datasets/wenet/opencpop) |
-| Kiritan | 1% | [Official distribution](https://zunko.jp/kiridev/login.php), [corpus paper](https://www.jstage.jst.go.jp/article/ast/42/3/42_E2074/_pdf) |
+| Dataset | Recordings | Hours | Singers | Songs | Sampling | Source and terms |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| OpenSinger | 42,947 | 51.900 | 76 | 1,127 | 43.5% | [Project](https://github.com/Multi-Singer/Multi-Singer.github.io) |
+| GTSinger | 26,711 | 75.291 | 20 | 610 | 32% | [Dataset](https://huggingface.co/datasets/AaronZ345/GTSinger), [license](https://github.com/AaronZ345/GTSinger/blob/master/dataset_license.md) |
+| M4Singer | 20,889 | 29.689 | 20 | 419 | 20% | [Project](https://github.com/M4Singer/M4Singer), [license](https://github.com/M4Singer/M4Singer/blob/master/dataset_license.md) |
+| ACE-Opencpop | 105,209 | 128.195 | 30 | 100 | 2% | [Dataset](https://huggingface.co/datasets/espnet/ace-opencpop-segments), [paper](https://arxiv.org/abs/2401.17619) |
+| Opencpop | 3,752 | 5.218 | 1 | 100 | 1.5% | [Project](https://wenet-e2e.github.io/opencpop/), [dataset](https://modelscope.cn/datasets/wenet/opencpop) |
+| Kiritan | 43 | 3.036 | 1 | 43 | 1% | [Official distribution](https://zunko.jp/kiridev/login.php), [corpus paper](https://www.jstage.jst.go.jp/article/ast/42/3/42_E2074/_pdf) |
+| **Total** | **199,551** | **293.329** | **148** | **-** | **100%** | |
 
 ## Sampling
 
@@ -28,6 +29,16 @@ requested frames per foundation update.
 Opencpop and ACE-Opencpop share one source-song family capped at 3.5% so a real
 song and its synthetic derivatives cannot cross the train/validation split.
 Synthetic ACE audio is excluded from vocoder training.
+
+## Summary
+
+The accepted corpus contains 199,551 recordings, 293.329 hours of audio, and
+148 namespaced singers. The song-disjoint split contains 179,067 training,
+10,449 validation, and 10,035 test recordings. After feature-length
+reconciliation, the training split contains 81,348,986 valid mel frames.
+
+Song counts are not summed because ACE-Opencpop and Opencpop share the same 100
+source-song identities.
 
 The released inference path also uses:
 
