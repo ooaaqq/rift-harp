@@ -206,6 +206,7 @@ def adapt(config: HARPConfig, args: argparse.Namespace) -> None:
     target_frames = args.valid_frames
     seen_frames = 0
     step = 0
+    next_checkpoint_frames = min(args.checkpoint_every_frames, target_frames)
     model.train()
     adapter.train()
     epoch = 0
@@ -243,24 +244,31 @@ def adapt(config: HARPConfig, args: argparse.Namespace) -> None:
                         {
                             "stage": args.stage,
                             "step": step,
-                            "loss": float(loss.total),
+                            "loss": float(loss.total.detach()),
                             "seen_target_valid_frames": seen_frames,
                         }
                     ),
                     flush=True,
                 )
+            if seen_frames >= next_checkpoint_frames:
+                _save_adaptation(
+                    output
+                    / (
+                        f"adapter-{args.stage}-step-{step:06d}"
+                        f"-frames-{seen_frames:012d}.pt"
+                    ),
+                    run,
+                    adapter,
+                    ema,
+                    optimizer,
+                    step,
+                    seen_frames,
+                )
+                while next_checkpoint_frames <= seen_frames:
+                    next_checkpoint_frames += args.checkpoint_every_frames
             if seen_frames >= target_frames:
                 break
         epoch += 1
-    _save_adaptation(
-        output / f"adapter-{args.stage}-step-{step:06d}.pt",
-        run,
-        adapter,
-        ema,
-        optimizer,
-        step,
-        seen_frames,
-    )
 
 
 def _save_adaptation(
@@ -310,7 +318,10 @@ def main() -> None:
     parser.add_argument("--learning-rate", type=float, default=2e-4)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--log-every-steps", type=int, default=20)
+    parser.add_argument("--checkpoint-every-frames", type=int, default=2_000_000)
     args = parser.parse_args()
+    if args.checkpoint_every_frames <= 0:
+        parser.error("--checkpoint-every-frames must be positive")
     adapt(HARPConfig.load(args.config), args)
 
 
