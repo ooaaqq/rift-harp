@@ -1,92 +1,73 @@
-# HARP-Core+ v1 contract
+# Architecture
 
-## Data and flow
+RIFT-HARP maps source content, pitch, energy, and a singer condition to a
+128-bin target log-mel spectrogram:
 
-Raw log-mel is centered, rotated by the frozen full-PCA basis, and scaled by
-clipped partial whitening. The transformed target is
+$$
+(C, F_0, R, e) \xrightarrow{\mathrm{HARP}} M.
+$$
 
-`y1 = gain * basis * (x1 - mean)`.
+## Acoustic representation
 
-Training constructs `yt = (1 - t) z + t y1` in FP32. Per-mode coefficients use
-the persisted transformed variance `lambda`:
+The 44.1 kHz frontend uses a 2048-sample FFT and window, hop size 512, Slaney
+mel filters from 40 Hz to 16 kHz, natural-log magnitude, and `center=false`.
+The frozen flow transform centers the log-mel vector \(x\), rotates it with a
+full PCA basis \(B\), and applies clipped partial whitening \(g\):
 
-```text
-q      = t^2 lambda + (1 - t)^2
-c_in   = q^-1/2
-c_skip = (t lambda - (1 - t)) / q
-c_out  = sqrt(lambda / q)
-v_hat  = c_skip yt + c_out F_theta
-```
+$$
+y_1 = g \odot B(x-\mu).
+$$
 
-The model learns only the standardized residual target. CFG combines
-conditional and null `F_theta`; the analytic skip is applied exactly once.
-Sampling integrates the transformed state in FP32 and applies the inverse
-transform only at the endpoint.
+## Residual flow objective
 
-## Conditioning
+For Gaussian noise \(\epsilon\) and timestep \(t\), training constructs
 
-The feature artifact persists the exact float32 Slaney filter centers produced
-by the mel grid, their SHA256, corrected harmonic statistics, and standardized
-`log(rms + 1e-5)` statistics. Model startup compares every geometry and RMS
-field against the resolved config.
+$$
+y_t=(1-t)\epsilon+t y_1.
+$$
 
-Harmonic occupancy uses a per-frame harmonic limit based on
-`min(mel_fmax, 0.95 * Nyquist)`, `n^-0.5` weighting, and per-frame maximum
-normalization. Standardization is followed by the voiced mask so unvoiced
-features remain exactly zero.
+Let \(\lambda\) be the persisted variance of each transformed mel mode:
 
-Content, pitch, harmonic, and energy branches are normalized separately.
-Magnitude-preserving concatenation makes their trainable mixing parameters
-describe energy shares rather than allowing branch width to dominate. Initial
-shares are approximately 76.0%, 10.8%, 10.8%, and 2.4%.
+$$
+q=t^2\lambda+(1-t)^2,
+\quad c_{\mathrm{in}}=q^{-1/2},
+$$
 
-## Backbone
+$$
+c_{\mathrm{skip}}=\frac{t\lambda-(1-t)}{q},
+\quad c_{\mathrm{out}}=\sqrt{\frac{\lambda}{q}}.
+$$
 
-The temporal backbone remains 1024 wide, 16 blocks deep, with 16 heads,
-head-dim 64, QK norm, RoPE, a 2816-channel gated Conv-FFN, and depthwise kernel
-31. Harmonic coordinates are injected through zero-initialized linear adapters
-before blocks 4, 8, and 12. The main residual head always predicts all 128
-transformed modes.
+The network predicts the standardized residual target
 
-Each block uses low-rank multiplicative time-speaker modulation:
+$$
+F^\star=\frac{(y_1-\epsilon)-c_{\mathrm{skip}}y_t}
+{c_{\mathrm{out}}},
+$$
 
-```text
-t_low = W_t(time_code)
-s_low = W_s(speaker_code)
-mixed = SiLU(W_mix([t_low, s_low, t_low * s_low]))
-mod   = W_out(mixed)
-```
+with masked mean-squared error over valid frames and mel channels. Sampling
+integrates the transformed state and applies the inverse transform once at the
+endpoint.
 
-`W_out`, harmonic adapters, and the full-band output are zero initialized.
+## Network
 
-## Training time and recovery
+The temporal backbone is 1024 channels wide with 16 blocks, 16 attention heads,
+QK normalization, RoPE, and a 2816-channel gated convolutional FFN with
+depthwise kernel 31. Separate content, pitch, harmonic, and energy stems are
+mixed before the backbone. Harmonic adapters reinject pitch coordinates before
+blocks 4, 8, and 12.
 
-`seen_valid_frames` is the authoritative exposure clock. The frozen warmup
-target is 163,072,000 valid frames. EMA decay for a batch containing `N` valid
-frames is `0.9999 ** (N / 16307.2)`; logs report the half-life in valid frames.
+Each block uses low-rank multiplicative time-singer modulation:
 
-Sampler batches are pure functions of seed, epoch, and step. DataLoader worker
-seeding uses an independent generator, so rebuilding a loader on resume cannot
-shift model noise or timestep RNG. Full checkpoints contain model, EMA,
-optimizer, progress counters, sampler position, CPU/CUDA/Python/NumPy RNG,
-resolved config, and both numerical contracts. Checkpoint writes are atomic and
-the index is append-only.
+$$
+t_l=W_t(t),\quad s_l=W_s(e),
+$$
 
-## Audits
+$$
+m=\operatorname{SiLU}(W_m[t_l,s_l,t_l\odot s_l]),
+\quad \mathrm{mod}=W_o(m).
+$$
 
-The independent flow audit must pass:
-
-- validation off-diagonal ratio at most 0.10;
-- validation maximum absolute correlation at most 0.30;
-- transformed variance P95/P05 at most 16;
-- transformed variance max/min at most 64;
-- median transformed variance between 0.8 and 1.25;
-- no lambda or q floor hits;
-- FP32 roundtrip maximum error at most `1e-4`;
-- a 4x gain cap relative to median raw gain.
-
-Local-field metrics first invert velocity to raw log-mel coordinates without a
-mean term, then report historical DCT bands across fixed timesteps and voiced,
-unvoiced, F0-quartile, stable-F0, and rapid-F0 strata. Endpoint comparisons,
-not raw same-t local NMSE ratios against V3/V4, remain the fair cross-architecture
-quality measure.
+The final head predicts all 128 transformed mel modes. PC-NSF reconstructs the
+waveform from the predicted mel and the same final F0 track used by the acoustic
+model.
