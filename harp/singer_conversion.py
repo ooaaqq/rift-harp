@@ -20,8 +20,7 @@ from .feature_contract import FeatureContract, validate_feature_contract
 from .flow import HARPFlow
 from .flow_transform import FlowTransform
 from .model import HARPCore
-from .performance import compile_model_in_place, configure_cuda
-from .precision import configure_heavy_linears
+from .performance import configure_cuda
 from .vocoder import (
     load_pc_nsf,
     prepare_pc_nsf_harmonic_source,
@@ -431,7 +430,6 @@ def main() -> None:
     model = HARPCore(config.model, config.harmonic, feature, config.num_speakers).to(
         device
     )
-    configure_heavy_linears(model, config.model.heavy_linear_precision)
     model.load_state_dict(parent["ema"], strict=True)
     model.eval()
     system = HARPFlow(
@@ -448,12 +446,6 @@ def main() -> None:
         device,
         sdpa_backend=config.training.sdpa_backend,
         allow_tf32=config.training.allow_tf32,
-    )
-    compile_model_in_place(
-        model,
-        config.training.compile_mode,
-        epilogue_fusion=config.training.inductor_epilogue_fusion,
-        shape_padding=config.training.inductor_shape_padding,
     )
     generator = torch.Generator(device="cpu").manual_seed(args.seed)
     noise = torch.randn(

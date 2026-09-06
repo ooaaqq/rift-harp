@@ -15,8 +15,7 @@ from .flow import HARPFlow
 from .flow_transform import FlowTransform
 from .manifest import load_manifest, manifest_sha256
 from .model import HARPCore
-from .performance import compile_model_in_place, configure_cuda
-from .precision import configure_heavy_linears
+from .performance import configure_cuda
 
 
 def main() -> None:
@@ -77,9 +76,6 @@ def main() -> None:
     model = HARPCore(
         config.model, config.harmonic, feature_contract, config.num_speakers
     ).to(device)
-    configure_heavy_linears(model, config.model.heavy_linear_precision)
-    if device.type == "cuda":
-        compile_model_in_place(model, "default")
     model.load_state_dict(checkpoint["ema"], strict=True)
     system = HARPFlow(
         model,

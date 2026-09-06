@@ -20,8 +20,7 @@ from .flow import HARPFlow
 from .flow_transform import FlowTransform
 from .manifest import load_manifest, manifest_sha256
 from .model import HARPCore
-from .performance import compile_model_in_place, configure_cuda
-from .precision import configure_heavy_linears
+from .performance import configure_cuda
 from .singer_conversion import (
     FrozenContentEncoder,
     _resize_matrix,
@@ -123,7 +122,6 @@ def build_bank(config: HARPConfig, args: argparse.Namespace) -> None:
     feature = FeatureContract.load(config.feature.contract_path)
     validate_feature_contract(feature, config.model, config.harmonic, config.feature)
     model = HARPCore(config.model, config.harmonic, feature, config.num_speakers)
-    configure_heavy_linears(model, config.model.heavy_linear_precision)
     model.load_state_dict(parent["ema"], strict=True)
     model.to(device).eval()
     system = HARPFlow(
@@ -137,13 +135,6 @@ def build_bank(config: HARPConfig, args: argparse.Namespace) -> None:
     missing = sorted(set(args.carrier_speaker) - speakers.keys())
     if missing:
         raise ValueError(f"unknown carrier speakers: {missing}")
-    if not args.no_compile:
-        compile_model_in_place(
-            model,
-            config.training.compile_mode,
-            epilogue_fusion=config.training.inductor_epilogue_fusion,
-            shape_padding=config.training.inductor_shape_padding,
-        )
     vocoder, vocoder_contract = load_pc_nsf(
         args.pc_nsf_checkout,
         args.vocoder_checkpoint,
@@ -310,7 +301,6 @@ def main() -> None:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--accept-generated", action="store_true")
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--no-compile", action="store_true")
     args = parser.parse_args()
     build_bank(HARPConfig.load(args.config), args)
 

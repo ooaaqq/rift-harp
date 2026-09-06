@@ -18,8 +18,7 @@ from .flow_transform import FlowTransform, full_precision_matmul, orthonormal_dc
 from .manifest import load_manifest, manifest_sha256
 from .model import HARPCore
 from .panel_cli import validate_panel_features
-from .performance import compile_model_in_place, configure_cuda
-from .precision import configure_heavy_linears
+from .performance import configure_cuda
 
 TIMESTEPS = (0.10, 0.25, 0.50, 0.75, 0.90, 0.95)
 BANDS = {"dct_0_15": (0, 16), "dct_16_31": (16, 32), "dct_32_127": (32, 128)}
@@ -126,9 +125,6 @@ def main() -> None:
     model = HARPCore(
         config.model, config.harmonic, feature_contract, config.num_speakers
     ).to(device)
-    configure_heavy_linears(model, config.model.heavy_linear_precision)
-    if device.type == "cuda":
-        compile_model_in_place(model, "default")
     system = HARPFlow(
         model,
         transform,

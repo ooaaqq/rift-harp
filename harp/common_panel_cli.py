@@ -23,8 +23,7 @@ from .flow_transform import FlowTransform, orthonormal_dct
 from .manifest import load_manifest, manifest_sha256
 from .model import HARPCore
 from .panel_cli import validate_panel_features
-from .performance import compile_model_in_place, configure_cuda
-from .precision import configure_heavy_linears
+from .performance import configure_cuda
 from .vocoder import load_pc_nsf, synthesize_pc_nsf
 
 LENGTHS = (256, 512, 768)
@@ -56,7 +55,6 @@ def main() -> None:
         choices=("null", "correct"),
         default=("null", "correct"),
     )
-    parser.add_argument("--skip-compile", action="store_true")
     parser.add_argument("--skip-vocoder", action="store_true")
     parser.add_argument("--pc-nsf-checkout", type=Path)
     parser.add_argument("--pc-nsf-lock", type=Path)
@@ -131,9 +129,6 @@ def main() -> None:
             raise ValueError("attention scale must be finite and positive")
         for block in model.blocks:
             block.attention.scale = args.attention_scale
-    configure_heavy_linears(model, config.model.heavy_linear_precision)
-    if device.type == "cuda" and not args.skip_compile:
-        compile_model_in_place(model, "default")
     system = HARPFlow(
         model,
         transform,
