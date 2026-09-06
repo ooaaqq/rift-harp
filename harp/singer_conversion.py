@@ -393,7 +393,7 @@ def _filename_component(value: str) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path("configs/foundation.json"))
-    parser.add_argument("--parent", type=Path, required=True)
+    parser.add_argument("--parent", type=Path)
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument("--finetune", type=Path, action="append")
     target.add_argument("--foundation-speaker", action="append")
@@ -414,6 +414,8 @@ def main() -> None:
     args = parser.parse_args()
     if any(value <= 0 for value in args.guidance):
         parser.error("--guidance values must be positive")
+    if args.foundation_speaker and args.parent is None:
+        parser.error("--parent is required with --foundation-speaker")
 
     import soundfile as sf
 
@@ -422,15 +424,21 @@ def main() -> None:
     args.output.mkdir(parents=True)
     config = HARPConfig.load(args.config)
     device = torch.device(args.device)
-    parent = torch.load(args.parent, map_location="cpu", weights_only=False, mmap=True)
-    validate_checkpoint_contract(parent["contract"], config)
+    parent = (
+        torch.load(args.parent, map_location="cpu", weights_only=False, mmap=True)
+        if args.parent is not None
+        else None
+    )
+    if parent is not None:
+        validate_checkpoint_contract(parent["contract"], config)
     transform = FlowTransform.load(config.flow.transform_path).to(device)
     feature = FeatureContract.load(config.feature.contract_path)
     validate_feature_contract(feature, config.model, config.harmonic, config.feature)
     model = HARPCore(config.model, config.harmonic, feature, config.num_speakers).to(
         device
     )
-    model.load_state_dict(parent["ema"], strict=True)
+    if parent is not None:
+        model.load_state_dict(parent["ema"], strict=True)
     model.eval()
     system = HARPFlow(
         model,
@@ -461,6 +469,7 @@ def main() -> None:
     results = []
     started = time.time()
     if args.foundation_speaker:
+        assert parent is not None
         targets = [
             {
                 "mode": "foundation",
@@ -476,7 +485,6 @@ def main() -> None:
         ]
     else:
         targets = []
-        parent_sha256 = parent.get("source_checkpoint_sha256") or _sha256(args.parent)
         for finetune_path in args.finetune:
             finetune = torch.load(
                 finetune_path, map_location="cpu", weights_only=False, mmap=True
@@ -488,8 +496,14 @@ def main() -> None:
                 "singer_finetune_inference_v1",
             }:
                 raise ValueError("--finetune must be a singer finetune checkpoint")
-            if finetune["run"].get("parent_checkpoint_sha256") != parent_sha256:
-                raise ValueError("finetune checkpoint belongs to another parent")
+            if finetune["run"].get("config_sha256") != config.digest():
+                raise ValueError("finetune checkpoint config does not match --config")
+            if parent is not None:
+                parent_sha256 = parent.get("source_checkpoint_sha256") or _sha256(
+                    args.parent
+                )
+                if finetune["run"].get("parent_checkpoint_sha256") != parent_sha256:
+                    raise ValueError("finetune checkpoint belongs to another parent")
             states = (
                 ("ema",)
                 if checkpoint_type == "singer_finetune_inference_v1"
@@ -593,8 +607,8 @@ def main() -> None:
         "target_mode": "foundation" if args.foundation_speaker else "finetune",
         "input": str(args.input),
         "input_sha256": _sha256(args.input),
-        "parent": str(args.parent),
-        "parent_sha256": _sha256(args.parent),
+        "parent": str(args.parent) if args.parent is not None else None,
+        "parent_sha256": _sha256(args.parent) if args.parent is not None else None,
         "solver": {"method": "euler", "steps": args.steps},
         "guidance_strengths": args.guidance,
         "seed": args.seed,

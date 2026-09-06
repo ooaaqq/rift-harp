@@ -14,7 +14,6 @@ in the foundation model repository.
 uv sync --extra evaluation
 uv run harp-convert-singer \
   --config configs/foundation.json \
-  --parent /path/to/foundation-6.441b-inference.pt \
   --finetune /path/to/singer-inference.pt \
   --input /path/to/vocals.wav \
   --output /path/to/output \
