@@ -38,7 +38,7 @@ C_T \rightarrow M_T, \qquad
 $$
 
 The second content tensor is re-extracted after the frozen foundation converts
-the target recording to a carrier singer \(j\). Teacher audio is an input
+the target recording to a carrier singer $j$. Teacher audio is an input
 perturbation only; the target remains the original recording.
 
 Build and review the pseudo-content bank:
