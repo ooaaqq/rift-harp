@@ -237,6 +237,7 @@ def render_mel(
     overlap: int,
     batch_size: int,
     steps: int,
+    guidance_strength: float,
 ) -> Tensor:
     frames = content.shape[0]
     left_context = (visible - core) // 2
@@ -280,7 +281,7 @@ def render_mel(
             batch["mask"],
             steps=steps,
             method="euler",
-            guidance_strength=1.0,
+            guidance_strength=guidance_strength,
             initial_noise=batch["noise"],
             speaker_code_override=speaker_code.expand(len(selected), -1),
             speaker_offsets=speaker_offsets,
@@ -351,10 +352,13 @@ def main() -> None:
         "--states", nargs="+", choices=("raw", "ema"), default=("raw", "ema")
     )
     parser.add_argument("--steps", type=int, default=32)
+    parser.add_argument("--guidance", type=float, nargs="+", default=(1.0,))
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--window-batch-size", type=int, default=16)
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
+    if any(value <= 0 for value in args.guidance):
+        parser.error("--guidance values must be positive")
 
     import soundfile as sf
 
@@ -414,48 +418,55 @@ def main() -> None:
             values = adapter["adapter"] if state == "raw" else adapter["ema"]
             code = torch.as_tensor(values["code"]).float().to(device)[None]
             offsets = torch.as_tensor(values["offsets"]).float().to(device)
-            mel = render_mel(
-                system,
-                content,
-                f0,
-                rms,
-                noise,
-                code,
-                offsets,
-                device,
-                visible=768,
-                core=384,
-                overlap=64,
-                batch_size=args.window_batch_size,
-                steps=args.steps,
-            )
-            converted = vocode_chunked(
-                vocoder, mel, f0, device, config.feature.hop_length
-            )
-            converted = F.pad(
-                converted, (0, max(0, expected_samples - converted.numel()))
-            )
-            converted = converted[:expected_samples]
-            frames = int(adapter["seen_target_valid_frames"])
-            filename = f"stage-a-{frames / 1_000_000:.3f}M-{state}.wav"
-            sf.write(
-                args.output / filename,
-                converted.numpy(),
-                config.feature.sample_rate,
-                subtype="PCM_24",
-            )
-            result = {
-                "adapter": str(adapter_path),
-                "adapter_sha256": _sha256(adapter_path),
-                "state": state,
-                "step": int(adapter["step"]),
-                "seen_target_valid_frames": frames,
-                "output": filename,
-                "output_sha256": _sha256(args.output / filename),
-                "peak": float(converted.abs().max()),
-            }
-            results.append(result)
-            print(json.dumps(result), flush=True)
+            for guidance in args.guidance:
+                mel = render_mel(
+                    system,
+                    content,
+                    f0,
+                    rms,
+                    noise,
+                    code,
+                    offsets,
+                    device,
+                    visible=768,
+                    core=384,
+                    overlap=64,
+                    batch_size=args.window_batch_size,
+                    steps=args.steps,
+                    guidance_strength=guidance,
+                )
+                converted = vocode_chunked(
+                    vocoder, mel, f0, device, config.feature.hop_length
+                )
+                converted = F.pad(
+                    converted, (0, max(0, expected_samples - converted.numel()))
+                )
+                converted = converted[:expected_samples]
+                frames = int(adapter["seen_target_valid_frames"])
+                guidance_name = str(guidance).replace(".", "p")
+                filename = (
+                    f"stage-a-{frames / 1_000_000:.3f}M-{state}"
+                    f"-guidance-{guidance_name}.wav"
+                )
+                sf.write(
+                    args.output / filename,
+                    converted.numpy(),
+                    config.feature.sample_rate,
+                    subtype="PCM_24",
+                )
+                result = {
+                    "adapter": str(adapter_path),
+                    "adapter_sha256": _sha256(adapter_path),
+                    "state": state,
+                    "step": int(adapter["step"]),
+                    "seen_target_valid_frames": frames,
+                    "guidance_strength": guidance,
+                    "output": filename,
+                    "output_sha256": _sha256(args.output / filename),
+                    "peak": float(converted.abs().max()),
+                }
+                results.append(result)
+                print(json.dumps(result), flush=True)
     manifest = {
         "artifact_type": "rift_harp_singer_conversion_v1",
         "input": str(args.input),
@@ -463,7 +474,7 @@ def main() -> None:
         "parent": str(args.parent),
         "parent_sha256": _sha256(args.parent),
         "solver": {"method": "euler", "steps": args.steps},
-        "guidance_strength": 1.0,
+        "guidance_strengths": args.guidance,
         "seed": args.seed,
         "window": {"visible": 768, "core": 384, "overlap": 64},
         "source_frames": content.shape[0],
