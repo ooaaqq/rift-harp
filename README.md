@@ -145,3 +145,40 @@ full-panel command renders fixed raw/EMA PC-NSF audio and records pitch and
 waveform-tail diagnostics. The speaker-progress command renders the locked A-to-B
 conversion panel and measures normalized progress with the pinned WavLM speaker
 encoder and historical source/target anchors.
+
+## Singer Adaptation
+
+Singer adaptation keeps the foundation EMA and all shared model weights frozen.
+Stage A learns one 256-dimensional target speaker code. Stage B starts from the
+EMA adapter from A and learns only the 17 target-specific AdaLN offsets. The
+adapter checkpoint is bound to the exact parent foundation checkpoint.
+
+Run stage A on a target-singer manifest (accepted `train` entries):
+
+```bash
+harp-adapt-singer \
+  --config configs/foundation.json \
+  --manifest /path/to/singer-manifest.jsonl \
+  --parent /path/to/foundation-full-or-audit.pt \
+  --output /path/to/singer-adapt-a \
+  --stage a \
+  --valid-frames 12000000
+```
+
+Run stage B from the selected stage-A adapter; it loads the stage-A EMA by
+default:
+
+```bash
+harp-adapt-singer \
+  --config configs/foundation.json \
+  --manifest /path/to/singer-manifest.jsonl \
+  --parent /path/to/foundation-full-or-audit.pt \
+  --init-adapter /path/to/singer-adapt-a/adapter-a-step-*.pt \
+  --output /path/to/singer-adapt-b \
+  --stage b \
+  --valid-frames 36000000
+```
+
+Use a song/recording-disjoint `dev` split and the fixed Euler32 external
+conversion panel to select checkpoints. The adaptation CLI deliberately does
+not alter the foundation transform, frontend, null row, or optimizer state.

@@ -33,6 +33,7 @@ harp-render-full-panel = "harp.full_panel_cli:main"
 harp-audit-speaker-progress = "harp.speaker_audit_cli:main"
 harp-compare-shadow-128 = "harp.common_panel_cli:main"
 harp-train = "harp.train:main"
+harp-adapt-singer = "harp.adaptation:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

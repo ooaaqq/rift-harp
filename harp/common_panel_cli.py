@@ -46,6 +46,16 @@ def main() -> None:
     parser.add_argument("--method", choices=("euler", "heun"), default="euler")
     parser.add_argument("--bootstrap-samples", type=int, default=10_000)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--attention-scale", type=float)
+    parser.add_argument(
+        "--model-states", nargs="+", choices=("raw", "ema"), default=("raw", "ema")
+    )
+    parser.add_argument(
+        "--conditions",
+        nargs="+",
+        choices=("null", "correct"),
+        default=("null", "correct"),
+    )
     parser.add_argument("--skip-compile", action="store_true")
     parser.add_argument("--skip-vocoder", action="store_true")
     parser.add_argument("--pc-nsf-checkout", type=Path)
@@ -116,6 +126,11 @@ def main() -> None:
     model = HARPCore(
         config.model, config.harmonic, feature_contract, config.num_speakers
     ).to(device)
+    if args.attention_scale is not None:
+        if not math.isfinite(args.attention_scale) or args.attention_scale <= 0:
+            raise ValueError("attention scale must be finite and positive")
+        for block in model.blocks:
+            block.attention.scale = args.attention_scale
     configure_heavy_linears(model, config.model.heavy_linear_precision)
     if device.type == "cuda" and not args.skip_compile:
         compile_model_in_place(model, "default")
@@ -139,10 +154,12 @@ def main() -> None:
         )
 
     models = {"v3_null": _load_v3_baseline(baseline, samples)}
-    for state_name, state in (("raw", checkpoint["model"]), ("ema", checkpoint["ema"])):
+    checkpoint_states = {"raw": checkpoint["model"], "ema": checkpoint["ema"]}
+    for state_name in args.model_states:
+        state = checkpoint_states[state_name]
         model.load_state_dict(state, strict=True)
         model.eval()
-        for condition in ("null", "correct"):
+        for condition in args.conditions:
             name = f"harp_{state_name}_{condition}"
             models[name] = _evaluate_harp(
                 samples,
@@ -199,6 +216,13 @@ def main() -> None:
             "primary_metric": "per-sample active raw-log-mel MSE",
             "bootstrap": "dataset-song grouped",
             "bootstrap_samples": args.bootstrap_samples,
+            "attention_scale": (
+                1.0 / math.sqrt(config.model.head_dim)
+                if args.attention_scale is None
+                else args.attention_scale
+            ),
+            "model_states": list(args.model_states),
+            "conditions": list(args.conditions),
             "catastrophe_threshold_full_raw_mse": float(
                 baseline["protocol"]["catastrophe_threshold_raw_mse"]
             ),

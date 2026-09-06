@@ -76,7 +76,13 @@ class HARPFlow(nn.Module):
         self.capture_model_inputs = False
         self.last_model_inputs: tuple[Tensor, ...] | None = None
 
-    def forward(self, batch: dict[str, Tensor]) -> FlowLoss:
+    def forward(
+        self,
+        batch: dict[str, Tensor],
+        *,
+        speaker_code_override: Tensor | None = None,
+        speaker_offsets: Tensor | None = None,
+    ) -> FlowLoss:
         raw_mel = batch["mel"].float()
         target = self.transform.transform(raw_mel)
         mask = batch["mask"]
@@ -122,7 +128,11 @@ class HARPFlow(nn.Module):
             )
         else:
             self.last_model_inputs = None
-        residual = self._model_residual(*model_inputs)
+        residual = self._model_residual(
+            *model_inputs,
+            speaker_code_override=speaker_code_override,
+            speaker_offsets=speaker_offsets,
+        )
         weights = mask.unsqueeze(-1).float()
         squared = (residual - residual_target).square() * weights
         denominator = weights.sum(dim=(1, 2)).clamp_min(1) * target.shape[-1]
@@ -150,6 +160,8 @@ class HARPFlow(nn.Module):
         method: str = "heun",
         generator: torch.Generator | None = None,
         initial_noise: Tensor | None = None,
+        speaker_code_override: Tensor | None = None,
+        speaker_offsets: Tensor | None = None,
     ) -> Tensor:
         if steps <= 0 or method not in {"euler", "heun"}:
             raise ValueError("invalid ODE sampler configuration")
@@ -184,6 +196,8 @@ class HARPFlow(nn.Module):
                 timestep,
                 mask,
                 guidance_strength,
+                speaker_code_override,
+                speaker_offsets,
             )
             proposal = state + delta * velocity
             if method == "heun" and index + 1 < steps:
@@ -198,6 +212,8 @@ class HARPFlow(nn.Module):
                     next_time,
                     mask,
                     guidance_strength,
+                    speaker_code_override,
+                    speaker_offsets,
                 )
                 state = state + delta * 0.5 * (velocity + next_velocity)
             else:
@@ -216,6 +232,8 @@ class HARPFlow(nn.Module):
         timestep: Tensor,
         mask: Tensor,
         strength: float,
+        speaker_code_override: Tensor | None = None,
+        speaker_offsets: Tensor | None = None,
     ) -> Tensor:
         coefficients = flow_coefficients(
             timestep,
@@ -225,7 +243,16 @@ class HARPFlow(nn.Module):
         )
         scaled_state = coefficients.c_in * state
         conditional = self._model_residual(
-            scaled_state, content, f0, rms, harmonic, speaker, timestep, mask
+            scaled_state,
+            content,
+            f0,
+            rms,
+            harmonic,
+            speaker,
+            timestep,
+            mask,
+            speaker_code_override=speaker_code_override,
+            speaker_offsets=speaker_offsets,
         )
         if strength == 1.0:
             residual = conditional
@@ -240,18 +267,29 @@ class HARPFlow(nn.Module):
                 null_speaker,
                 timestep,
                 mask,
+                speaker_code_override=None,
+                speaker_offsets=None,
             )
             residual = unconditional + strength * (conditional - unconditional)
         return coefficients.c_skip * state + coefficients.c_out * residual
 
-    def _model_residual(self, *args: Tensor) -> Tensor:
+    def _model_residual(
+        self,
+        *args: Tensor,
+        speaker_code_override: Tensor | None = None,
+        speaker_offsets: Tensor | None = None,
+    ) -> Tensor:
         device_type = next(self.model.parameters()).device.type
         with torch.autocast(
             device_type=device_type,
             dtype=torch.bfloat16,
             enabled=device_type == "cuda",
         ):
-            return self.model(*args).float()
+            return self.model(
+                *args,
+                speaker_code_override=speaker_code_override,
+                speaker_offsets=speaker_offsets,
+            ).float()
 
 
 def sample_timestep(batch: int, device: torch.device) -> Tensor:
