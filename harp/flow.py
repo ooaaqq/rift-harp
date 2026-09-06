@@ -10,6 +10,16 @@ from .flow_transform import FlowTransform
 from .model import HARPCore
 
 
+def _inference_dtype(device: torch.device) -> torch.dtype:
+    if device.type != "cuda":
+        return torch.float32
+    return (
+        torch.bfloat16
+        if torch.cuda.get_device_capability(device) >= (8, 0)
+        else torch.float16
+    )
+
+
 @dataclass(frozen=True)
 class FlowCoefficients:
     c_in: Tensor
@@ -66,6 +76,7 @@ class HARPFlow(nn.Module):
         speaker_drop_probability: float = 0.05,
         lambda_floor: float = 1e-4,
         q_floor: float = 1e-6,
+        compute_dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
         self.model = model
@@ -73,6 +84,7 @@ class HARPFlow(nn.Module):
         self.speaker_drop_probability = speaker_drop_probability
         self.lambda_floor = lambda_floor
         self.q_floor = q_floor
+        self.compute_dtype = compute_dtype
         self.capture_model_inputs = False
         self.last_model_inputs: tuple[Tensor, ...] | None = None
 
@@ -271,9 +283,12 @@ class HARPFlow(nn.Module):
         speaker_code_override: Tensor | None = None,
     ) -> Tensor:
         device_type = next(self.model.parameters()).device.type
+        dtype = self.compute_dtype or _inference_dtype(
+            next(self.model.parameters()).device
+        )
         with torch.autocast(
             device_type=device_type,
-            dtype=torch.bfloat16,
+            dtype=dtype,
             enabled=device_type == "cuda",
         ):
             return self.model(

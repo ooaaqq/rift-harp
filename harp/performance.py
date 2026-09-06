@@ -8,23 +8,39 @@ def configure_cuda(
     device: torch.device, *, sdpa_backend: str, allow_tf32: bool
 ) -> dict[str, object]:
     if device.type != "cuda":
-        return {"device": str(device), "cudnn_sdpa": False}
+        return {
+            "device": str(device),
+            "precision": "fp32",
+            "sdpa_backend": "eager",
+            "cudnn_sdpa": False,
+        }
     if sdpa_backend != "cudnn":
-        raise ValueError("HARP v1 supports only the configured cuDNN SDPA backend")
+        raise ValueError("unsupported SDPA backend")
+    capability = torch.cuda.get_device_capability(device)
+    ampere_or_newer = capability >= (8, 0)
     torch.set_float32_matmul_precision("high" if allow_tf32 else "highest")
     torch.backends.cudnn.allow_tf32 = allow_tf32
-    torch.backends.cuda.enable_flash_sdp(False)
-    torch.backends.cuda.enable_mem_efficient_sdp(False)
-    torch.backends.cuda.enable_math_sdp(False)
-    torch.backends.cuda.enable_cudnn_sdp(True)
-    if not torch.backends.cuda.cudnn_sdp_enabled():
-        raise RuntimeError("cuDNN SDPA could not be enabled")
+    if ampere_or_newer:
+        torch.backends.cuda.enable_flash_sdp(False)
+        torch.backends.cuda.enable_mem_efficient_sdp(False)
+        torch.backends.cuda.enable_math_sdp(False)
+        torch.backends.cuda.enable_cudnn_sdp(True)
+        attention_backend = "cudnn"
+    else:
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+        torch.backends.cuda.enable_math_sdp(True)
+        torch.backends.cuda.enable_cudnn_sdp(False)
+        attention_backend = "auto"
     return {
         "device": str(device),
         "gpu": torch.cuda.get_device_name(device),
         "torch": torch.__version__,
         "cuda": torch.version.cuda,
-        "cudnn_sdpa": True,
+        "compute_capability": capability,
+        "precision": "bf16" if ampere_or_newer else "fp16",
+        "sdpa_backend": attention_backend,
+        "cudnn_sdpa": ampere_or_newer,
         "allow_tf32": allow_tf32,
     }
 

@@ -14,6 +14,11 @@ The production contract is:
 - warmup, EMA, checkpoints, and audit milestones measured in valid frames;
 - no V4 checkpoint resume, high-band loss, or auxiliary 2D refiner.
 
+Inference deliberately uses a separate correctness reference: eager PyTorch
+execution with BF16 on SM80+ GPUs, FP16 on older CUDA GPUs such as T4/SM75,
+and automatic PyTorch SDPA dispatch when cuDNN SDPA is unavailable. Inference
+does not require `torch.compile`, TorchAO FP8, or Triton-specific kernels.
+
 ## Required artifacts
 
 All commands consume the same resolved config and manifest. Run them from the
