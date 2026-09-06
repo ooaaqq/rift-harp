@@ -450,7 +450,7 @@ def main() -> None:
     waveform, content, f0, rms, expected_samples = extract_features(
         args.input, args.content_model, config, device
     )
-    configure_cuda(
+    runtime = configure_cuda(
         device,
         sdpa_backend=config.training.sdpa_backend,
         allow_tf32=config.training.allow_tf32,
@@ -617,6 +617,7 @@ def main() -> None:
         "source_samples": expected_samples,
         "source_peak": float(waveform.abs().max()),
         "vocoder_revision": vocoder_contract.revision,
+        "runtime": runtime,
         "elapsed_seconds": time.time() - started,
         "results": results,
     }
