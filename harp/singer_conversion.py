@@ -1,0 +1,482 @@
+"""Offline whole-song conversion with a frozen foundation singer adapter."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import time
+from pathlib import Path
+from typing import Any
+
+import torch
+import torch.nn.functional as F
+from torch import Tensor, nn
+
+from .checkpoint import validate_checkpoint_contract
+from .config import HARPConfig
+from .feature_contract import FeatureContract, validate_feature_contract
+from .flow import HARPFlow
+from .flow_transform import FlowTransform
+from .model import HARPCore
+from .performance import compile_model_in_place, configure_cuda
+from .precision import configure_heavy_linears
+from .vocoder import load_pc_nsf, synthesize_pc_nsf
+
+
+class FrozenContentEncoder(nn.Module):
+    """Pinned ContentVec backbone used by the foundation feature pipeline."""
+
+    def __init__(self, backbone: nn.Module, content_dim: int) -> None:
+        super().__init__()
+        self.backbone = backbone
+        if int(backbone.config.hidden_size) != content_dim:
+            raise ValueError("ContentVec hidden size differs from HARP content_dim")
+        for parameter in backbone.parameters():
+            parameter.requires_grad_(False)
+        backbone.eval()
+
+    @classmethod
+    def load(cls, path: Path, content_dim: int) -> FrozenContentEncoder:
+        from transformers import AutoModel
+
+        backbone = AutoModel.from_pretrained(
+            str(path), local_files_only=True, trust_remote_code=False
+        )
+        return cls(backbone, content_dim)
+
+    def train(self, mode: bool = True) -> FrozenContentEncoder:
+        super().train(False)
+        return self
+
+    def forward(self, waveform: Tensor, mask: Tensor) -> tuple[Tensor, Tensor]:
+        output: Any = self.backbone(
+            input_values=waveform,
+            attention_mask=mask.long(),
+            return_dict=True,
+        )
+        hidden = output.last_hidden_state
+        mask_builder = getattr(
+            self.backbone, "_get_feature_vector_attention_mask", None
+        )
+        if mask_builder is not None:
+            hidden_mask = mask_builder(hidden.shape[1], mask.long()).bool()
+        else:
+            hidden_mask = F.interpolate(
+                mask.float().unsqueeze(1), size=hidden.shape[1], mode="nearest"
+            ).squeeze(1).bool()
+        return hidden, hidden_mask
+
+
+@torch.inference_mode()
+def encode_content(
+    encoder: FrozenContentEncoder,
+    waveform: Tensor,
+    sample_rate: int,
+    device: torch.device,
+    *,
+    chunk_seconds: float = 30.0,
+    overlap_seconds: float = 1.0,
+    phase_shift_seconds: float = 0.01,
+) -> Tensor:
+    shift = round(phase_shift_seconds * sample_rate)
+    shifted = torch.zeros_like(waveform)
+    shifted[:-shift] = waveform[shift:]
+    valid = torch.ones_like(waveform, dtype=torch.bool)
+    shifted_valid = valid.clone()
+    shifted_valid[-shift:] = False
+    phases = []
+    for values, value_mask in ((waveform, valid), (shifted, shifted_valid)):
+        phases.append(
+            _encode_content_phase(
+                encoder,
+                values,
+                value_mask,
+                sample_rate,
+                device,
+                chunk_seconds,
+                overlap_seconds,
+            )
+        )
+    frames = min(phases[0].shape[0], phases[1].shape[0])
+    if frames < 2:
+        raise ValueError("ContentVec extraction produced too few frames")
+    return torch.stack(
+        (phases[0][: frames - 1], phases[1][: frames - 1]), dim=1
+    ).reshape(2 * (frames - 1), -1)
+
+
+def _encode_content_phase(
+    encoder: FrozenContentEncoder,
+    waveform: Tensor,
+    valid: Tensor,
+    sample_rate: int,
+    device: torch.device,
+    chunk_seconds: float,
+    overlap_seconds: float,
+) -> Tensor:
+    chunk = round(chunk_seconds * sample_rate)
+    overlap = round(overlap_seconds * sample_rate)
+    stride = chunk - overlap
+    if stride <= 0:
+        raise ValueError("ContentVec chunk must exceed overlap")
+    pieces = []
+    start = 0
+    while start < waveform.numel():
+        stop = min(waveform.numel(), start + chunk)
+        segment = waveform[start:stop].to(device)[None]
+        segment_mask = valid[start:stop].to(device)[None]
+        output, output_mask = encoder(segment, segment_mask)
+        count = int(output_mask[0].sum())
+        content = output[0, :count]
+        ratio = content.shape[0] / segment.shape[1]
+        left = round(overlap / 2 * ratio) if start else 0
+        right_trim = round(overlap / 2 * ratio) if stop < waveform.numel() else 0
+        right = content.shape[0] - right_trim
+        pieces.append(content[left:right].float().cpu())
+        if stop == waveform.numel():
+            break
+        start += stride
+    return torch.cat(pieces)
+
+
+@torch.inference_mode()
+def extract_features(
+    input_path: Path,
+    content_model: Path,
+    config: HARPConfig,
+    device: torch.device,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, int]:
+    import soundfile as sf
+    import torchaudio.functional as AF
+    from torchfcpe import spawn_bundled_infer_model
+
+    audio, source_rate = sf.read(input_path, dtype="float32", always_2d=True)
+    waveform = torch.from_numpy(audio).mean(dim=1)
+    if source_rate != config.feature.sample_rate:
+        waveform = AF.resample(waveform, source_rate, config.feature.sample_rate)
+    expected_samples = waveform.numel()
+    frames = expected_samples // config.feature.hop_length
+    if frames <= 0:
+        raise ValueError("input is shorter than one HARP frame")
+
+    content_waveform = AF.resample(
+        waveform, config.feature.sample_rate, 16_000
+    )
+    encoder = FrozenContentEncoder.load(content_model, config.model.content_dim)
+    encoder.to(device).eval()
+    content = encode_content(encoder, content_waveform, 16_000, device)
+    del encoder
+    content = _resize_matrix(content, frames)
+
+    pitch_model = spawn_bundled_infer_model(device=str(device))
+    f0 = pitch_model.infer(
+        waveform.clamp(-1, 1).to(device)[None, :, None],
+        sr=config.feature.sample_rate,
+        decoder_mode="local_argmax",
+        threshold=0.006,
+        f0_min=config.harmonic.f0_min,
+        f0_max=config.harmonic.f0_max,
+        interp_uv=False,
+        output_interp_target_length=frames,
+    )
+    f0 = _resize_vector(torch.as_tensor(f0).squeeze().float().cpu(), frames)
+    del pitch_model
+
+    window = config.feature.win_length
+    pad = (window - config.feature.hop_length) // 2
+    padded = F.pad(waveform[None, None], (pad, pad), mode="reflect")[0, 0]
+    rms = padded.unfold(0, window, config.feature.hop_length).square().mean(-1).sqrt()
+    rms = _resize_vector(rms, frames)
+    return waveform, content, f0, rms, expected_samples
+
+
+def _resize_matrix(value: Tensor, frames: int) -> Tensor:
+    return F.interpolate(
+        value.T[None], size=frames, mode="linear", align_corners=False
+    )[0].T.contiguous()
+
+
+def _resize_vector(value: Tensor, frames: int) -> Tensor:
+    return F.interpolate(
+        value.flatten()[None, None], size=frames, mode="linear", align_corners=False
+    )[0, 0]
+
+
+def _window_starts(frames: int, core: int, overlap: int) -> list[int]:
+    if core <= overlap or frames <= 0:
+        raise ValueError("invalid output window geometry")
+    return list(range(0, frames, core - overlap))
+
+
+def _core_weights(length: int, overlap: int, first: bool, last: bool) -> Tensor:
+    weights = torch.ones(length)
+    fade = min(overlap, length)
+    if not first and fade:
+        phase = torch.linspace(0, torch.pi / 2, fade)
+        weights[:fade] = phase.sin().square()
+    if not last and fade:
+        phase = torch.linspace(0, torch.pi / 2, fade)
+        weights[-fade:] = phase.cos().square()
+    return weights
+
+
+@torch.inference_mode()
+def render_mel(
+    system: HARPFlow,
+    content: Tensor,
+    f0: Tensor,
+    rms: Tensor,
+    noise: Tensor,
+    speaker_code: Tensor,
+    speaker_offsets: Tensor,
+    device: torch.device,
+    *,
+    visible: int,
+    core: int,
+    overlap: int,
+    batch_size: int,
+    steps: int,
+) -> Tensor:
+    frames = content.shape[0]
+    left_context = (visible - core) // 2
+    starts = _window_starts(frames, core, overlap)
+    accumulated = torch.zeros(frames, noise.shape[-1])
+    weight_sum = torch.zeros(frames)
+    for batch_start in range(0, len(starts), batch_size):
+        selected = starts[batch_start : batch_start + batch_size]
+        batch = {
+            "content": torch.zeros(len(selected), visible, content.shape[-1]),
+            "f0": torch.zeros(len(selected), visible, 1),
+            "rms": torch.zeros(len(selected), visible, 1),
+            "noise": torch.zeros(len(selected), visible, noise.shape[-1]),
+            "mask": torch.zeros(len(selected), visible, dtype=torch.bool),
+        }
+        for index, start in enumerate(selected):
+            visible_start = start - left_context
+            source_start = max(0, visible_start)
+            source_stop = min(frames, visible_start + visible)
+            target_start = source_start - visible_start
+            target_stop = target_start + source_stop - source_start
+            batch["content"][index, target_start:target_stop] = content[
+                source_start:source_stop
+            ]
+            batch["f0"][index, target_start:target_stop, 0] = f0[
+                source_start:source_stop
+            ]
+            batch["rms"][index, target_start:target_stop, 0] = rms[
+                source_start:source_stop
+            ]
+            batch["noise"][index, target_start:target_stop] = noise[
+                source_start:source_stop
+            ]
+            batch["mask"][index, target_start:target_stop] = True
+        batch = {name: value.to(device) for name, value in batch.items()}
+        prediction = system.sample(
+            batch["content"],
+            batch["f0"],
+            batch["rms"],
+            torch.zeros(len(selected), dtype=torch.long, device=device),
+            batch["mask"],
+            steps=steps,
+            method="euler",
+            guidance_strength=1.0,
+            initial_noise=batch["noise"],
+            speaker_code_override=speaker_code.expand(len(selected), -1),
+            speaker_offsets=speaker_offsets,
+        ).cpu()
+        for index, start in enumerate(selected):
+            stop = min(frames, start + core)
+            length = stop - start
+            window_start = left_context
+            values = prediction[index, window_start : window_start + length]
+            weights = _core_weights(
+                length, overlap, first=start == 0, last=stop == frames
+            )
+            accumulated[start:stop] += values * weights[:, None]
+            weight_sum[start:stop] += weights
+    if bool((weight_sum <= 0).any()):
+        raise RuntimeError("mel overlap-add left uncovered frames")
+    return accumulated / weight_sum[:, None]
+
+
+@torch.inference_mode()
+def vocode_chunked(
+    vocoder,
+    mel: Tensor,
+    f0: Tensor,
+    device: torch.device,
+    hop_length: int,
+    *,
+    core_frames: int = 1024,
+    context_frames: int = 64,
+) -> Tensor:
+    pieces = []
+    for start in range(0, mel.shape[0], core_frames):
+        stop = min(mel.shape[0], start + core_frames)
+        visible_start = max(0, start - context_frames)
+        visible_stop = min(mel.shape[0], stop + context_frames)
+        waveform = synthesize_pc_nsf(
+            vocoder,
+            mel[visible_start:visible_stop],
+            f0[visible_start:visible_stop],
+            device,
+        )
+        keep_start = (start - visible_start) * hop_length
+        keep_length = (stop - start) * hop_length
+        pieces.append(waveform[keep_start : keep_start + keep_length])
+    return torch.cat(pieces)
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=Path("configs/foundation.json"))
+    parser.add_argument("--parent", type=Path, required=True)
+    parser.add_argument("--adapter", type=Path, action="append", required=True)
+    parser.add_argument("--input", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--content-model", type=Path, required=True)
+    parser.add_argument("--pc-nsf-checkout", type=Path, required=True)
+    parser.add_argument("--pc-nsf-lock", type=Path, required=True)
+    parser.add_argument("--vocoder-checkpoint", type=Path, required=True)
+    parser.add_argument(
+        "--states", nargs="+", choices=("raw", "ema"), default=("raw", "ema")
+    )
+    parser.add_argument("--steps", type=int, default=32)
+    parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--window-batch-size", type=int, default=16)
+    parser.add_argument("--device", default="cuda")
+    args = parser.parse_args()
+
+    import soundfile as sf
+
+    if args.output.exists():
+        raise FileExistsError(f"output directory already exists: {args.output}")
+    args.output.mkdir(parents=True)
+    config = HARPConfig.load(args.config)
+    device = torch.device(args.device)
+    parent = torch.load(args.parent, map_location="cpu", weights_only=False, mmap=True)
+    validate_checkpoint_contract(parent["contract"], config)
+    transform = FlowTransform.load(config.flow.transform_path).to(device)
+    feature = FeatureContract.load(config.feature.contract_path)
+    validate_feature_contract(feature, config.model, config.harmonic, config.feature)
+    model = HARPCore(
+        config.model, config.harmonic, feature, config.num_speakers
+    ).to(device)
+    configure_heavy_linears(model, config.model.heavy_linear_precision)
+    model.load_state_dict(parent["ema"], strict=True)
+    model.eval()
+    system = HARPFlow(
+        model,
+        transform,
+        speaker_drop_probability=0,
+        lambda_floor=config.flow.lambda_floor,
+        q_floor=config.flow.q_floor,
+    ).eval()
+    waveform, content, f0, rms, expected_samples = extract_features(
+        args.input, args.content_model, config, device
+    )
+    configure_cuda(
+        device,
+        sdpa_backend=config.training.sdpa_backend,
+        allow_tf32=config.training.allow_tf32,
+    )
+    compile_model_in_place(
+        model,
+        config.training.compile_mode,
+        epilogue_fusion=config.training.inductor_epilogue_fusion,
+        shape_padding=config.training.inductor_shape_padding,
+    )
+    generator = torch.Generator(device="cpu").manual_seed(args.seed)
+    noise = torch.randn(
+        content.shape[0], config.model.mel_channels, generator=generator
+    )
+    vocoder, vocoder_contract = load_pc_nsf(
+        args.pc_nsf_checkout,
+        args.vocoder_checkpoint,
+        args.pc_nsf_lock,
+        config,
+        device,
+    )
+    results = []
+    started = time.time()
+    for adapter_path in args.adapter:
+        adapter = torch.load(adapter_path, map_location="cpu", weights_only=False)
+        for state in args.states:
+            values = adapter["adapter"] if state == "raw" else adapter["ema"]
+            code = torch.as_tensor(values["code"]).float().to(device)[None]
+            offsets = torch.as_tensor(values["offsets"]).float().to(device)
+            mel = render_mel(
+                system,
+                content,
+                f0,
+                rms,
+                noise,
+                code,
+                offsets,
+                device,
+                visible=768,
+                core=384,
+                overlap=64,
+                batch_size=args.window_batch_size,
+                steps=args.steps,
+            )
+            converted = vocode_chunked(
+                vocoder, mel, f0, device, config.feature.hop_length
+            )
+            converted = F.pad(
+                converted, (0, max(0, expected_samples - converted.numel()))
+            )
+            converted = converted[:expected_samples]
+            frames = int(adapter["seen_target_valid_frames"])
+            filename = f"stage-a-{frames / 1_000_000:.3f}M-{state}.wav"
+            sf.write(
+                args.output / filename,
+                converted.numpy(),
+                config.feature.sample_rate,
+                subtype="PCM_24",
+            )
+            result = {
+                "adapter": str(adapter_path),
+                "adapter_sha256": _sha256(adapter_path),
+                "state": state,
+                "step": int(adapter["step"]),
+                "seen_target_valid_frames": frames,
+                "output": filename,
+                "output_sha256": _sha256(args.output / filename),
+                "peak": float(converted.abs().max()),
+            }
+            results.append(result)
+            print(json.dumps(result), flush=True)
+    manifest = {
+        "artifact_type": "rift_harp_singer_conversion_v1",
+        "input": str(args.input),
+        "input_sha256": _sha256(args.input),
+        "parent": str(args.parent),
+        "parent_sha256": _sha256(args.parent),
+        "solver": {"method": "euler", "steps": args.steps},
+        "guidance_strength": 1.0,
+        "seed": args.seed,
+        "window": {"visible": 768, "core": 384, "overlap": 64},
+        "source_frames": content.shape[0],
+        "source_samples": expected_samples,
+        "source_peak": float(waveform.abs().max()),
+        "vocoder_revision": vocoder_contract.revision,
+        "elapsed_seconds": time.time() - started,
+        "results": results,
+    }
+    (args.output / "manifest.json").write_text(
+        json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+    )
+
+
+if __name__ == "__main__":
+    main()

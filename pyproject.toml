@@ -35,6 +35,7 @@ harp-compare-shadow-128 = "harp.common_panel_cli:main"
 harp-train = "harp.train:main"
 harp-adapt-singer = "harp.adaptation:main"
 harp-plot-adaptation = "harp.adaptation_diagnostics:main"
+harp-convert-singer = "harp.singer_conversion:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
