@@ -476,19 +476,30 @@ def main() -> None:
         ]
     else:
         targets = []
-        parent_sha256 = _sha256(args.parent)
+        parent_sha256 = parent.get("source_checkpoint_sha256") or _sha256(args.parent)
         for finetune_path in args.finetune:
             finetune = torch.load(
                 finetune_path, map_location="cpu", weights_only=False, mmap=True
             )
-            if finetune.get("checkpoint_type") not in {
+            checkpoint_type = finetune.get("checkpoint_type")
+            if checkpoint_type not in {
                 "singer_finetune_audit_v1",
                 "singer_finetune_full_v1",
+                "singer_finetune_inference_v1",
             }:
                 raise ValueError("--finetune must be a singer finetune checkpoint")
             if finetune["run"].get("parent_checkpoint_sha256") != parent_sha256:
                 raise ValueError("finetune checkpoint belongs to another parent")
-            for state in args.states:
+            states = (
+                ("ema",)
+                if checkpoint_type == "singer_finetune_inference_v1"
+                else args.states
+            )
+            if "ema" not in finetune or "target_code_ema" not in finetune:
+                raise ValueError(
+                    "inference checkpoint must contain EMA model and target code"
+                )
+            for state in states:
                 targets.append(
                     {
                         "mode": "finetune",

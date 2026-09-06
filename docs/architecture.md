@@ -1,7 +1,5 @@
 # HARP-Core+ v1 contract
 
-HARP-Core+ is intentionally incompatible with RIFT-SVC V4.
-
 ## Data and flow
 
 Raw log-mel is centered, rotated by the frozen full-PCA basis, and scaled by

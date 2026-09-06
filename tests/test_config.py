@@ -36,5 +36,5 @@ def test_old_checkpoint_family_is_rejected() -> None:
     )
     with pytest.raises(ValueError, match="not a RIFT-HARP"):
         validate_checkpoint_contract(
-            {"model_family": "rift-svc-v4", "checkpoint_schema": 4}, config
+            {"model_family": "another-model", "checkpoint_schema": 4}, config
         )
