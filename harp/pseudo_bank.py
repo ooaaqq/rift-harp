@@ -238,8 +238,16 @@ def build_bank(config: HARPConfig, args: argparse.Namespace) -> None:
                 subtype="PCM_24",
             )
             content_waveform = AF.resample(waveform, config.feature.sample_rate, 16_000)
+            if device.type == "cuda":
+                torch.backends.cuda.enable_cudnn_sdp(False)
+                torch.backends.cuda.enable_math_sdp(True)
             pseudo_content = (
                 encode_content(encoder, content_waveform, 16_000, device).float().cpu()
+            )
+            configure_cuda(
+                device,
+                sdpa_backend=config.training.sdpa_backend,
+                allow_tf32=config.training.allow_tf32,
             )
             pseudo_content = _resize_matrix(pseudo_content, entry.frames)
             torch.save(pseudo_content, content_path)
