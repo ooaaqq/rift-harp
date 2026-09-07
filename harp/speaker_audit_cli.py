@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import argparse
 import hashlib
 import json
@@ -22,7 +20,7 @@ from .flow_transform import FlowTransform
 from .full_panel_cli import _load_raw_manifest, _reference_crop
 from .manifest import load_manifest
 from .model import HARPCore
-from .performance import configure_cuda
+from .performance import configure_cuda, resolve_device
 from .vocoder import load_pc_nsf, synthesize_pc_nsf
 
 WAVLM_REPOSITORY = "microsoft/wavlm-base-plus-sv"
@@ -45,7 +43,7 @@ def main() -> None:
     parser.add_argument("--method", choices=("euler", "heun"), default="euler")
     parser.add_argument("--wavlm-batch-size", type=int, default=4)
     parser.add_argument("--limit", type=int)
-    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--device", default="auto")
     args = parser.parse_args()
     if args.steps <= 0 or args.wavlm_batch_size <= 0:
         raise ValueError("solver steps and WavLM batch size must be positive")
@@ -83,7 +81,7 @@ def main() -> None:
         pairs, dataset, id_to_index, checkpoint["speaker_to_id"]
     )
 
-    device = torch.device(args.device)
+    device = resolve_device(args.device)
     if device.type == "cuda":
         configure_cuda(
             device,

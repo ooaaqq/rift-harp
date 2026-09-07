@@ -1,7 +1,22 @@
-from __future__ import annotations
-
 import torch
 from torch import nn
+
+
+def resolve_device(spec: str) -> torch.device:
+    """Resolve the CLI device spec while keeping explicit requests strict."""
+    if spec == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    try:
+        device = torch.device(spec)
+    except (RuntimeError, TypeError) as error:
+        raise ValueError(
+            f"invalid device {spec!r}; use auto, cpu, or a torch device"
+        ) from error
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError(
+            f"{spec} requested but CUDA is unavailable; use --device auto or cpu"
+        )
+    return device
 
 
 def configure_cuda(

@@ -1,7 +1,5 @@
 """Target-specific HARP finetuning with pseudo-speaker content inputs."""
 
-from __future__ import annotations
-
 import argparse
 import hashlib
 import json
@@ -27,7 +25,7 @@ from .flow import HARPFlow
 from .flow_transform import FlowTransform
 from .manifest import ManifestEntry, load_manifest, manifest_sha256
 from .model import HARPCore
-from .performance import compile_model_in_place, configure_cuda
+from .performance import compile_model_in_place, configure_cuda, resolve_device
 from .precision import configure_heavy_linears
 
 
@@ -301,7 +299,7 @@ def _save_checkpoint(
 
 
 def finetune(config: HARPConfig, args: argparse.Namespace) -> None:
-    device = torch.device(args.device)
+    device = resolve_device(args.device)
     configure_cuda(
         device,
         sdpa_backend=config.training.sdpa_backend,
@@ -566,7 +564,7 @@ def main() -> None:
     parser.add_argument("--parent", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--resume", type=Path)
-    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--device", default="auto")
     parser.add_argument("--valid-frames", type=int, default=100_000_000)
     parser.add_argument("--warmup-frames", type=int, default=2_000_000)
     parser.add_argument("--ema-half-life-frames", type=int, default=2_000_000)

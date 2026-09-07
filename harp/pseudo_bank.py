@@ -1,7 +1,5 @@
 """Build offline pseudo-speaker ContentVec variants from a frozen HARP teacher."""
 
-from __future__ import annotations
-
 import argparse
 import hashlib
 import json
@@ -20,7 +18,7 @@ from .flow import HARPFlow
 from .flow_transform import FlowTransform
 from .manifest import load_manifest, manifest_sha256
 from .model import HARPCore
-from .performance import configure_cuda
+from .performance import configure_cuda, resolve_device
 from .singer_conversion import (
     FrozenContentEncoder,
     _resize_matrix,
@@ -110,7 +108,7 @@ def build_bank(config: HARPConfig, args: argparse.Namespace) -> None:
         raise FileNotFoundError("resume requires an existing pseudo bank")
     (output / "waveforms").mkdir(parents=True, exist_ok=args.resume)
     (output / "content").mkdir(exist_ok=args.resume)
-    device = torch.device(args.device)
+    device = resolve_device(args.device)
     configure_cuda(
         device,
         sdpa_backend=config.training.sdpa_backend,
@@ -298,7 +296,7 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=32)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--window-batch-size", type=int, default=16)
-    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--device", default="auto")
     parser.add_argument("--accept-generated", action="store_true")
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()

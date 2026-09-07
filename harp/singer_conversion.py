@@ -20,7 +20,7 @@ from .feature_contract import FeatureContract, validate_feature_contract
 from .flow import HARPFlow
 from .flow_transform import FlowTransform
 from .model import HARPCore
-from .performance import configure_cuda
+from .performance import configure_cuda, resolve_device
 from .vocoder import (
     load_pc_nsf,
     prepare_pc_nsf_harmonic_source,
@@ -410,7 +410,7 @@ def main() -> None:
     parser.add_argument("--guidance", type=float, nargs="+", default=(1.0,))
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--window-batch-size", type=int, default=16)
-    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--device", default="auto")
     args = parser.parse_args()
     if any(value <= 0 for value in args.guidance):
         parser.error("--guidance values must be positive")
@@ -423,7 +423,7 @@ def main() -> None:
         raise FileExistsError(f"output directory already exists: {args.output}")
     args.output.mkdir(parents=True)
     config = HARPConfig.load(args.config)
-    device = torch.device(args.device)
+    device = resolve_device(args.device)
     parent = (
         torch.load(args.parent, map_location="cpu", weights_only=False, mmap=True)
         if args.parent is not None

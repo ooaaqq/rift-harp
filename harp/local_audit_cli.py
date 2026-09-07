@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import argparse
 import json
 import math
@@ -18,7 +16,7 @@ from .flow_transform import FlowTransform, full_precision_matmul, orthonormal_dc
 from .manifest import load_manifest, manifest_sha256
 from .model import HARPCore
 from .panel_cli import validate_panel_features
-from .performance import configure_cuda
+from .performance import configure_cuda, resolve_device
 
 TIMESTEPS = (0.10, 0.25, 0.50, 0.75, 0.90, 0.95)
 BANDS = {"dct_0_15": (0, 16), "dct_16_31": (16, 32), "dct_32_127": (32, 128)}
@@ -72,7 +70,7 @@ def main() -> None:
     parser.add_argument("--panels", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--device", default="auto")
     args = parser.parse_args()
     config = HARPConfig.load(args.config)
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
@@ -113,7 +111,7 @@ def main() -> None:
             sample["noise_seed"] = torch.tensor(int(item["noise_seed"]))
             loaded_panels[name].append(sample)
     thresholds = _stratum_thresholds(loaded_panels)
-    device = torch.device(args.device)
+    device = resolve_device(args.device)
     if device.type == "cuda":
         configure_cuda(
             device,

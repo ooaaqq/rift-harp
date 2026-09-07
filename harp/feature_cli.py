@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import argparse
 import json
 from pathlib import Path
@@ -16,6 +14,7 @@ from .feature_contract import (
 )
 from .harmonic import HarmonicFeatures
 from .manifest import load_manifest, manifest_sha256
+from .performance import resolve_device
 
 
 def main() -> None:
@@ -24,7 +23,7 @@ def main() -> None:
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--frames", type=int, default=3_000_000)
-    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--device", default="auto")
     args = parser.parse_args()
     if not 3_000_000 <= args.frames <= 5_000_000:
         raise ValueError("the feature contract requires 3M to 5M valid frames")
@@ -43,16 +42,16 @@ def main() -> None:
         mel_only=True,
     )
     sampler = HierarchicalBatchSampler(entries, config)
+    device = resolve_device(args.device)
     loader = DataLoader(
         dataset,
         batch_sampler=sampler,
         collate_fn=collate_features,
         num_workers=config.sampling.num_workers,
-        pin_memory=args.device.startswith("cuda"),
+        pin_memory=device.type == "cuda",
         prefetch_factor=config.sampling.prefetch_factor,
         persistent_workers=config.sampling.persistent_workers,
     )
-    device = torch.device(args.device)
     centers = slaney_mel_centers(
         config.model.mel_channels, config.harmonic.fmin, config.harmonic.fmax
     ).to(device)

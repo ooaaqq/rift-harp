@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import argparse
 import json
 from collections import defaultdict
@@ -18,7 +16,7 @@ from .local_audit_cli import BANDS, MetricAccumulator
 from .manifest import load_manifest, manifest_sha256
 from .model import HARPCore
 from .panel_cli import validate_panel_features
-from .performance import configure_cuda
+from .performance import configure_cuda, resolve_device
 
 
 def main() -> None:
@@ -30,7 +28,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--steps", type=int, default=32)
     parser.add_argument("--method", choices=("euler", "heun"), default="euler")
-    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--device", default="auto")
     args = parser.parse_args()
     config = HARPConfig.load(args.config)
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
@@ -55,7 +53,7 @@ def main() -> None:
         voiced_crop_probability=config.training.voiced_crop_probability,
     )
     batches = _load_batches(dataset, id_to_index, panel_artifact)
-    device = torch.device(args.device)
+    device = resolve_device(args.device)
     if device.type == "cuda":
         configure_cuda(
             device,

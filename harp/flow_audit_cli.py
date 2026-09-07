@@ -16,6 +16,7 @@ from .data import FeatureDataset, HierarchicalBatchSampler, collate_features
 from .flow import flow_coefficients, sample_timestep
 from .flow_transform import FlowTransform
 from .manifest import load_manifest, manifest_sha256
+from .performance import resolve_device
 
 
 @dataclass
@@ -85,7 +86,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--frames", type=int, default=750_000)
     parser.add_argument("--seed", type=int, default=2027)
-    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--device", default="auto")
     args = parser.parse_args()
     if not 500_000 <= args.frames <= 1_000_000:
         raise ValueError("independent audit requires 0.5M to 1M valid frames")
@@ -106,18 +107,18 @@ def main() -> None:
         mel_only=True,
     )
     sampler = HierarchicalBatchSampler(entries, audit_config)
+    device = resolve_device(args.device)
     loader = DataLoader(
         dataset,
         batch_sampler=sampler,
         collate_fn=collate_features,
         num_workers=config.sampling.num_workers,
-        pin_memory=args.device.startswith("cuda"),
+        pin_memory=device.type == "cuda",
         prefetch_factor=config.sampling.prefetch_factor,
         persistent_workers=config.sampling.persistent_workers,
     )
     transform_path = args.transform or Path(config.flow.transform_path)
     transform_sha256 = _sha256(transform_path)
-    device = torch.device(args.device)
     transform = FlowTransform.load(transform_path).to(device)
     gain_clip = transform.metadata.get("gain_clip_relative_median")
     if gain_clip not in (4.0, [0.25, 4.0]):

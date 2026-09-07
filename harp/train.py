@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import argparse
 import hashlib
 import json
@@ -37,7 +35,7 @@ from .flow_transform import FlowTransform
 from .manifest import load_manifest, manifest_sha256
 from .model import HARPCore
 from .optimizer import build_optimizer
-from .performance import compile_model_in_place, configure_cuda
+from .performance import compile_model_in_place, configure_cuda, resolve_device
 from .precision import configure_heavy_linears
 from .telemetry import model_activation_telemetry, optimizer_role_telemetry
 from .training_state import (
@@ -56,7 +54,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--steps", type=int)
-    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--device", default="auto")
     parser.add_argument("--no-compile", action="store_true")
     parser.add_argument("--compiler-cache-artifact", type=Path)
     parser.add_argument("--execute-training", action="store_true")
@@ -82,9 +80,7 @@ def main() -> None:
 
 
 def train(config: HARPConfig, entries: list, args: argparse.Namespace) -> None:
-    device = torch.device(args.device)
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA requested but unavailable")
+    device = resolve_device(args.device)
     runtime = configure_cuda(
         device,
         sdpa_backend=config.training.sdpa_backend,

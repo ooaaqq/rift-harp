@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import argparse
 import hashlib
 import json
@@ -23,7 +21,7 @@ from .flow_transform import FlowTransform, orthonormal_dct
 from .manifest import load_manifest, manifest_sha256
 from .model import HARPCore
 from .panel_cli import validate_panel_features
-from .performance import configure_cuda
+from .performance import configure_cuda, resolve_device
 from .vocoder import load_pc_nsf, synthesize_pc_nsf
 
 LENGTHS = (256, 512, 768)
@@ -44,7 +42,7 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=32)
     parser.add_argument("--method", choices=("euler", "heun"), default="euler")
     parser.add_argument("--bootstrap-samples", type=int, default=10_000)
-    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--device", default="auto")
     parser.add_argument("--attention-scale", type=float)
     parser.add_argument(
         "--model-states", nargs="+", choices=("raw", "ema"), default=("raw", "ema")
@@ -112,7 +110,7 @@ def main() -> None:
         len(samples), max(LENGTHS), config.model.mel_channels, noise_seed
     )
 
-    device = torch.device(args.device)
+    device = resolve_device(args.device)
     if device.type == "cuda":
         configure_cuda(
             device,

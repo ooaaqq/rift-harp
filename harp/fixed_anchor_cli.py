@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import argparse
 import json
 import statistics
@@ -15,7 +13,7 @@ from .flow import HARPFlow
 from .flow_transform import FlowTransform
 from .manifest import load_manifest, manifest_sha256
 from .model import HARPCore
-from .performance import configure_cuda
+from .performance import configure_cuda, resolve_device
 
 
 def main() -> None:
@@ -31,7 +29,7 @@ def main() -> None:
     parser.add_argument("--score-frames", type=int, default=128)
     parser.add_argument("--steps", type=int, default=32)
     parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--device", default="auto")
     args = parser.parse_args()
     contexts = tuple(sorted(set(args.contexts)))
     if not contexts or min(contexts) <= 0 or max(contexts) > 768:
@@ -64,7 +62,7 @@ def main() -> None:
         speaker_to_id=checkpoint["speaker_to_id"],
         voiced_crop_probability=config.training.voiced_crop_probability,
     )
-    device = torch.device(args.device)
+    device = resolve_device(args.device)
     if device.type == "cuda":
         configure_cuda(
             device,
