@@ -3,23 +3,25 @@ name = "rift-harp"
 version = "0.1.0"
 description = "HARP-Core+ singing voice conversion training stack"
 readme = "README.md"
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.14,<3.15"
 dependencies = [
     "numpy>=2.0.0",
-    "torch==2.12.1",
+    "torch==2.14.0",
     "torchao==0.18.0",
 ]
 
 [project.optional-dependencies]
 evaluation = [
     "soundfile>=0.13.1",
-    "torchaudio==2.12.1",
+    "torchaudio==2.11.0",
     "torchfcpe==0.0.4",
     "transformers>=5.0.0",
 ]
 dev = [
     "pytest>=8.4.0",
     "ruff>=0.14.0",
+    "soundfile>=0.13.1",
+    "torchaudio==2.11.0",
 ]
 
 [project.scripts]
@@ -42,7 +44,7 @@ pythonpath = ["."]
 
 [tool.ruff]
 line-length = 88
-target-version = "py311"
+target-version = "py314"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

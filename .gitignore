@@ -1,4 +1,5 @@
 .venv/
+.direnv/
 __pycache__/
 .pytest_cache/
 .ruff_cache/
@@ -6,4 +7,3 @@ __pycache__/
 artifacts/
 checkpoints/
 runs/
-

@@ -9,6 +9,25 @@ artifacts are available on [Hugging Face](https://huggingface.co/ooaaqq/RIFT-HAR
 - [Model architecture and flow objective](docs/architecture.md)
 - [Training datasets and third-party components](docs/datasets.md)
 
+## Development
+
+The project targets Python 3.14. With direnv enabled, approve the project once;
+subsequent entries load the flake automatically. If direnv is unavailable, run
+`nix develop` first. Then synchronize the development dependencies and run the
+CPU test suite:
+
+```bash
+direnv allow
+uv sync --extra dev
+uv run pytest
+ruff check .
+```
+
+All regular CLIs default to `--device auto`, selecting CUDA when available and
+CPU otherwise. A short local training or fine-tuning smoke run can also add
+`--no-compile`; explicit `--device cpu` remains available for deterministic CPU
+runs.
+
 ## Foundation training
 
 Training consumes a song-disjoint manifest with cached mel, F0, RMS, and
