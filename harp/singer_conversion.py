@@ -16,6 +16,7 @@ from torch import Tensor, nn
 
 from .checkpoint import validate_checkpoint_contract
 from .config import HARPConfig
+from .f0 import FCPEFrontend
 from .feature_contract import FeatureContract, validate_feature_contract
 from .flow import HARPFlow
 from .flow_transform import FlowTransform
@@ -157,7 +158,6 @@ def extract_features(
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, int]:
     import soundfile as sf
     import torchaudio.functional as AF
-    from torchfcpe import spawn_bundled_infer_model
 
     audio, source_rate = sf.read(input_path, dtype="float32", always_2d=True)
     waveform = torch.from_numpy(audio).mean(dim=1)
@@ -175,19 +175,20 @@ def extract_features(
     del encoder
     content = _resize_matrix(content, frames)
 
-    pitch_model = spawn_bundled_infer_model(device=str(device))
-    f0 = pitch_model.infer(
-        waveform.clamp(-1, 1).to(device)[None, :, None],
-        sr=config.feature.sample_rate,
-        decoder_mode="local_argmax",
+    pitch_frontend = FCPEFrontend.load(device)
+    f0_track = pitch_frontend.extract_compatible(
+        waveform.clamp(-1, 1),
+        config.feature.sample_rate,
+        target_sample_rate=config.feature.sample_rate,
+        target_hop_length=config.feature.hop_length,
         threshold=0.006,
         f0_min=config.harmonic.f0_min,
         f0_max=config.harmonic.f0_max,
-        interp_uv=False,
-        output_interp_target_length=frames,
     )
-    f0 = _resize_vector(torch.as_tensor(f0).squeeze().float().cpu(), frames)
-    del pitch_model
+    f0 = f0_track.f0_hz
+    if f0.numel() != frames:
+        raise RuntimeError("canonical F0 track differs from HARP feature frames")
+    del pitch_frontend
 
     window = config.feature.win_length
     pad = (window - config.feature.hop_length) // 2

@@ -14,6 +14,7 @@ from .checkpoint import validate_checkpoint_contract, validate_external_artifact
 from .config import HARPConfig
 from .data import FeatureDataset, SampleRequest, collate_features
 from .endpoint_audit_cli import _fixed_noise
+from .f0 import FCPEFrontend
 from .feature_contract import FeatureContract
 from .flow import HARPFlow
 from .flow_transform import FlowTransform
@@ -191,17 +192,17 @@ def _render(
                 waveform = synthesize_pc_nsf(
                     vocoder, prediction[index, :frames], target_f0, device
                 )
-                generated_f0 = pitch_model.infer(
-                    waveform.to(device)[None, :, None],
-                    sr=config.feature.sample_rate,
-                    decoder_mode="local_argmax",
+                generated_f0 = pitch_model.extract_compatible(
+                    waveform,
+                    config.feature.sample_rate,
+                    target_sample_rate=config.feature.sample_rate,
+                    target_hop_length=config.feature.hop_length,
                     threshold=0.006,
                     f0_min=config.harmonic.f0_min,
                     f0_max=config.harmonic.f0_max,
-                    interp_uv=False,
-                    output_interp_target_length=frames,
-                )
-                generated_f0 = torch.as_tensor(generated_f0).squeeze().float().cpu()
+                ).f0_hz
+                if generated_f0.numel() != frames:
+                    raise RuntimeError("generated F0 differs from panel frame count")
                 stem = f"{length}-{item['entry_id']}-{int(item['crop_start'])}"
                 reference_name = f"{stem}-reference.wav"
                 generated_name = f"{stem}-{state_name}.wav"
@@ -327,10 +328,9 @@ def _load_raw_manifest(path: Path) -> dict[str, dict]:
 
 def _load_pitch_model(device: torch.device):
     try:
-        from torchfcpe import spawn_bundled_infer_model
+        return FCPEFrontend.load(device)
     except ImportError as error:
         raise RuntimeError("full-panel evaluation requires torchfcpe") from error
-    return spawn_bundled_infer_model(device=str(device))
 
 
 def pitch_metrics(target_f0: Tensor, generated_f0: Tensor) -> dict[str, float | int]:
