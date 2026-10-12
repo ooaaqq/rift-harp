@@ -110,10 +110,19 @@ uv run harp-convert-singer \
   --pc-nsf-checkout /path/to/SingingVocoders \
   --pc-nsf-lock /path/to/pc_nsf_hifigan.lock.json \
   --vocoder-checkpoint /path/to/pc_nsf_hifigan.ckpt \
-  --states ema \
+  --state ema \
   --steps 32 \
   --guidance 1.0
 ```
+
+For batches, construct `harp.singer_conversion.SingerConverter` once per device
+with the same asset paths, then call `convert(input_path, steps=32,
+guidance=1.0, seed=7, window_batch_size=16)` for each song. It returns a CPU
+float waveform and a record of the conversion. ContentVec, FCPE, the acoustic
+model, and vocoder remain loaded between calls. The CLI publishes one
+`converted.wav` in Float WAV format and `manifest.json` into a new directory.
+The final partial feature frame uses reflected source context; the synthesized
+waveform is trimmed to the resampled source length.
 
 ## License
 

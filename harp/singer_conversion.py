@@ -1,12 +1,16 @@
-"""Offline conversion with a foundation speaker or target finetune."""
+"""Resident target-singer conversion and a single-output CLI."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
-import re
+import math
+import os
+import shutil
+import tempfile
 import time
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +18,6 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from .checkpoint import validate_checkpoint_contract
 from .config import HARPConfig
 from .f0 import FCPEFrontend
 from .feature_contract import FeatureContract, validate_feature_contract
@@ -149,53 +152,73 @@ def _encode_content_phase(
     return torch.cat(pieces)
 
 
-@torch.inference_mode()
-def extract_features(
-    input_path: Path,
-    content_model: Path,
-    config: HARPConfig,
-    device: torch.device,
-) -> tuple[Tensor, Tensor, Tensor, Tensor, int]:
-    import soundfile as sf
-    import torchaudio.functional as AF
+class FeatureExtractor:
+    """Keep ContentVec and FCPE loaded for a queue of songs on one device."""
 
-    audio, source_rate = sf.read(input_path, dtype="float32", always_2d=True)
-    waveform = torch.from_numpy(audio).mean(dim=1)
-    if source_rate != config.feature.sample_rate:
-        waveform = AF.resample(waveform, source_rate, config.feature.sample_rate)
-    expected_samples = waveform.numel()
-    frames = expected_samples // config.feature.hop_length
-    if frames <= 0:
-        raise ValueError("input is shorter than one HARP frame")
+    def __init__(self, content_model: Path, config: HARPConfig, device: torch.device):
+        self.config = config
+        self.device = device
+        self.encoder = FrozenContentEncoder.load(
+            content_model, config.model.content_dim
+        )
+        self.encoder.to(device).eval()
+        self.pitch_frontend = FCPEFrontend.load(device)
 
-    content_waveform = AF.resample(waveform, config.feature.sample_rate, 16_000)
-    encoder = FrozenContentEncoder.load(content_model, config.model.content_dim)
-    encoder.to(device).eval()
-    content = encode_content(encoder, content_waveform, 16_000, device)
-    del encoder
-    content = _resize_matrix(content, frames)
+    @torch.inference_mode()
+    def extract(self, input_path: Path) -> tuple[Tensor, Tensor, Tensor, Tensor, int]:
+        config, device = self.config, self.device
+        import soundfile as sf
+        import torchaudio.functional as AF
 
-    pitch_frontend = FCPEFrontend.load(device)
-    f0_track = pitch_frontend.extract_compatible(
-        waveform.clamp(-1, 1),
-        config.feature.sample_rate,
-        target_sample_rate=config.feature.sample_rate,
-        target_hop_length=config.feature.hop_length,
-        threshold=0.006,
-        f0_min=config.harmonic.f0_min,
-        f0_max=config.harmonic.f0_max,
-    )
-    f0 = f0_track.f0_hz
-    if f0.numel() != frames:
-        raise RuntimeError("canonical F0 track differs from HARP feature frames")
-    del pitch_frontend
+        audio, source_rate = sf.read(input_path, dtype="float32", always_2d=True)
+        waveform = torch.from_numpy(audio).mean(dim=1)
+        if source_rate != config.feature.sample_rate:
+            target_samples = round(
+                Fraction(len(audio), source_rate) * config.feature.sample_rate
+            )
+            waveform = AF.resample(waveform, source_rate, config.feature.sample_rate)[
+                :target_samples
+            ]
+        if not torch.isfinite(waveform).all():
+            raise ValueError("input contains non-finite samples")
+        expected_samples = waveform.numel()
+        hop = config.feature.hop_length
+        frames = (expected_samples + hop - 1) // hop
+        if frames <= 0:
+            raise ValueError("input is shorter than one HARP frame")
 
-    window = config.feature.win_length
-    pad = (window - config.feature.hop_length) // 2
-    padded = F.pad(waveform[None, None], (pad, pad), mode="reflect")[0, 0]
-    rms = padded.unfold(0, window, config.feature.hop_length).square().mean(-1).sqrt()
-    rms = _resize_vector(rms, frames)
-    return waveform, content, f0, rms, expected_samples
+        # Complete the last feature frame with reflected input context. Synthesis
+        # covers the original tail; only context beyond the source is trimmed.
+        context = frames * hop - expected_samples
+        if context:
+            waveform = F.pad(waveform[None, None], (0, context), mode="reflect")[0, 0]
+        content_waveform = AF.resample(waveform, config.feature.sample_rate, 16_000)
+        encoder = self.encoder
+        content = encode_content(encoder, content_waveform, 16_000, device)
+        content = _resize_matrix(content, frames)
+
+        pitch_frontend = self.pitch_frontend
+        f0_track = pitch_frontend.extract_compatible(
+            waveform.clamp(-1, 1),
+            config.feature.sample_rate,
+            target_sample_rate=config.feature.sample_rate,
+            target_hop_length=config.feature.hop_length,
+            threshold=0.006,
+            f0_min=config.harmonic.f0_min,
+            f0_max=config.harmonic.f0_max,
+        )
+        f0 = f0_track.f0_hz
+        if f0.numel() != frames:
+            raise RuntimeError("canonical F0 track differs from HARP feature frames")
+
+        window = config.feature.win_length
+        pad = (window - config.feature.hop_length) // 2
+        padded = F.pad(waveform[None, None], (pad, pad), mode="reflect")[0, 0]
+        rms = (
+            padded.unfold(0, window, config.feature.hop_length).square().mean(-1).sqrt()
+        )
+        rms = _resize_vector(rms, frames)
+        return waveform, content, f0, rms, expected_samples
 
 
 def _resize_matrix(value: Tensor, frames: int) -> Tensor:
@@ -371,260 +394,215 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _resolve_foundation_speakers(
-    requested: list[str], speaker_to_id: dict[str, int]
-) -> list[tuple[str, int]]:
-    missing = [speaker for speaker in requested if speaker not in speaker_to_id]
-    if missing:
-        available = ", ".join(sorted(speaker_to_id))
-        raise ValueError(
-            f"unknown foundation speaker(s): {', '.join(missing)}; "
-            f"available speakers: {available}"
+class SingerConverter:
+    """One target singer, one device, reusable model and feature extraction."""
+
+    def __init__(
+        self,
+        *,
+        config: Path,
+        finetune: Path,
+        content_model: Path,
+        pc_nsf_checkout: Path,
+        pc_nsf_lock: Path,
+        vocoder_checkpoint: Path,
+        device: str = "auto",
+        state: str = "ema",
+    ):
+        self.config = HARPConfig.load(config)
+        self.device = resolve_device(device)
+        self.runtime = configure_cuda(
+            self.device,
+            sdpa_backend=self.config.training.sdpa_backend,
+            allow_tf32=self.config.training.allow_tf32,
         )
-    if len(set(requested)) != len(requested):
-        raise ValueError("foundation speakers must be unique")
-    return [(speaker, int(speaker_to_id[speaker])) for speaker in requested]
+        checkpoint = torch.load(
+            finetune, map_location="cpu", weights_only=False, mmap=True
+        )
+        if checkpoint.get("checkpoint_type") not in {
+            "singer_finetune_audit_v1",
+            "singer_finetune_full_v1",
+            "singer_finetune_inference_v1",
+        }:
+            raise ValueError("expected a singer finetune checkpoint")
+        if checkpoint["run"].get("config_sha256") != self.config.digest():
+            raise ValueError("checkpoint config differs from selected config")
+        if state not in {"raw", "ema"}:
+            raise ValueError("state must be raw or ema")
+        weights_key, code_key = (
+            ("ema", "target_code_ema") if state == "ema" else ("model", "target_code")
+        )
+        if weights_key not in checkpoint or code_key not in checkpoint:
+            raise ValueError(f"checkpoint does not contain {state} state")
+        transform = FlowTransform.load(self.config.flow.transform_path).to(self.device)
+        feature = FeatureContract.load(self.config.feature.contract_path)
+        validate_feature_contract(
+            feature, self.config.model, self.config.harmonic, self.config.feature
+        )
+        model = HARPCore(
+            self.config.model, self.config.harmonic, feature, self.config.num_speakers
+        ).to(self.device)
+        model.load_state_dict(checkpoint[weights_key], strict=True)
+        model.eval()
+        self.system = HARPFlow(
+            model,
+            transform,
+            speaker_drop_probability=0,
+            lambda_floor=self.config.flow.lambda_floor,
+            q_floor=self.config.flow.q_floor,
+        ).eval()
+        self.code = torch.as_tensor(checkpoint[code_key]).float().to(self.device)[None]
+        self.finetune_sha256 = _sha256(finetune)
+        self.state = state
+        self.features = FeatureExtractor(content_model, self.config, self.device)
+        self.vocoder, contract = load_pc_nsf(
+            pc_nsf_checkout,
+            vocoder_checkpoint,
+            pc_nsf_lock,
+            self.config,
+            self.device,
+        )
+        self.vocoder_revision = contract.revision
 
-
-def _filename_component(value: str) -> str:
-    component = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-.")
-    return component or "speaker"
+    @torch.inference_mode()
+    def convert(
+        self,
+        input_path: Path,
+        *,
+        steps: int,
+        guidance: float,
+        seed: int,
+        window_batch_size: int,
+    ) -> tuple[Tensor, dict]:
+        if (
+            steps <= 0
+            or not math.isfinite(guidance)
+            or guidance < 0
+            or window_batch_size <= 0
+        ):
+            raise ValueError(
+                "steps and batch size must be positive; "
+                "guidance must be finite and nonnegative"
+            )
+        started = time.perf_counter()
+        waveform, content, f0, rms, samples = self.features.extract(input_path)
+        generator = torch.Generator(device="cpu").manual_seed(seed)
+        noise = torch.randn(
+            content.shape[0], self.config.model.mel_channels, generator=generator
+        )
+        mel = render_mel(
+            self.system,
+            content,
+            f0,
+            rms,
+            noise,
+            0,
+            self.code,
+            self.device,
+            visible=768,
+            core=384,
+            overlap=64,
+            batch_size=window_batch_size,
+            steps=steps,
+            guidance_strength=guidance,
+        )
+        converted = vocode_chunked(
+            self.vocoder, mel, f0, self.device, self.config.feature.hop_length
+        )
+        if converted.numel() < samples:
+            raise RuntimeError(
+                f"vocoder output is short: {converted.numel()}/{samples}"
+            )
+        converted = converted[:samples].float().cpu()
+        if not torch.isfinite(converted).all():
+            raise ValueError("conversion produced non-finite samples")
+        return converted, {
+            "artifact_type": "rift_harp_singer_conversion_v3",
+            "input_sha256": _sha256(input_path),
+            "finetune_sha256": self.finetune_sha256,
+            "state": self.state,
+            "sample_rate": self.config.feature.sample_rate,
+            "source_samples": samples,
+            "source_frames": content.shape[0],
+            "source_peak": float(waveform.abs().max()),
+            "peak": float(converted.abs().max()),
+            "params": {
+                "steps": steps,
+                "guidance": guidance,
+                "seed": seed,
+                "window_batch_size": window_batch_size,
+            },
+            "vocoder_revision": self.vocoder_revision,
+            "runtime": self.runtime,
+            "elapsed_seconds": time.perf_counter() - started,
+        }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=Path("configs/foundation.json"))
-    parser.add_argument("--parent", type=Path)
-    target = parser.add_mutually_exclusive_group(required=True)
-    target.add_argument("--finetune", type=Path, action="append")
-    target.add_argument("--foundation-speaker", action="append")
+    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--finetune", type=Path, required=True)
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--content-model", type=Path, required=True)
     parser.add_argument("--pc-nsf-checkout", type=Path, required=True)
     parser.add_argument("--pc-nsf-lock", type=Path, required=True)
     parser.add_argument("--vocoder-checkpoint", type=Path, required=True)
-    parser.add_argument(
-        "--states", nargs="+", choices=("raw", "ema"), default=("raw", "ema")
-    )
+    parser.add_argument("--state", choices=("raw", "ema"), default="ema")
     parser.add_argument("--steps", type=int, default=32)
-    parser.add_argument("--guidance", type=float, nargs="+", default=(1.0,))
+    parser.add_argument("--guidance", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--window-batch-size", type=int, default=16)
     parser.add_argument("--device", default="auto")
     args = parser.parse_args()
-    if any(value <= 0 for value in args.guidance):
-        parser.error("--guidance values must be positive")
-    if args.foundation_speaker and args.parent is None:
-        parser.error("--parent is required with --foundation-speaker")
-
     import soundfile as sf
 
     if args.output.exists():
-        raise FileExistsError(f"output directory already exists: {args.output}")
-    args.output.mkdir(parents=True)
-    config = HARPConfig.load(args.config)
-    device = resolve_device(args.device)
-    parent = (
-        torch.load(args.parent, map_location="cpu", weights_only=False, mmap=True)
-        if args.parent is not None
-        else None
+        raise FileExistsError(args.output)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    converter = SingerConverter(
+        config=args.config,
+        finetune=args.finetune,
+        content_model=args.content_model,
+        pc_nsf_checkout=args.pc_nsf_checkout,
+        pc_nsf_lock=args.pc_nsf_lock,
+        vocoder_checkpoint=args.vocoder_checkpoint,
+        device=args.device,
+        state=args.state,
     )
-    if parent is not None:
-        validate_checkpoint_contract(parent["contract"], config)
-    transform = FlowTransform.load(config.flow.transform_path).to(device)
-    feature = FeatureContract.load(config.feature.contract_path)
-    validate_feature_contract(feature, config.model, config.harmonic, config.feature)
-    model = HARPCore(config.model, config.harmonic, feature, config.num_speakers).to(
-        device
+    audio, record = converter.convert(
+        args.input,
+        steps=args.steps,
+        guidance=args.guidance,
+        seed=args.seed,
+        window_batch_size=args.window_batch_size,
     )
-    if parent is not None:
-        model.load_state_dict(parent["ema"], strict=True)
-    model.eval()
-    system = HARPFlow(
-        model,
-        transform,
-        speaker_drop_probability=0,
-        lambda_floor=config.flow.lambda_floor,
-        q_floor=config.flow.q_floor,
-    ).eval()
-    waveform, content, f0, rms, expected_samples = extract_features(
-        args.input, args.content_model, config, device
+    staging = Path(
+        tempfile.mkdtemp(prefix=f".{args.output.name}.", dir=args.output.parent)
     )
-    runtime = configure_cuda(
-        device,
-        sdpa_backend=config.training.sdpa_backend,
-        allow_tf32=config.training.allow_tf32,
-    )
-    generator = torch.Generator(device="cpu").manual_seed(args.seed)
-    noise = torch.randn(
-        content.shape[0], config.model.mel_channels, generator=generator
-    )
-    vocoder, vocoder_contract = load_pc_nsf(
-        args.pc_nsf_checkout,
-        args.vocoder_checkpoint,
-        args.pc_nsf_lock,
-        config,
-        device,
-    )
-    results = []
-    started = time.time()
-    if args.foundation_speaker:
-        assert parent is not None
-        targets = [
-            {
-                "mode": "foundation",
-                "name": name,
-                "speaker_id": speaker_id,
-                "state": "ema",
-                "code": None,
-                "model_state": parent["ema"],
-            }
-            for name, speaker_id in _resolve_foundation_speakers(
-                args.foundation_speaker, parent["speaker_to_id"]
-            )
-        ]
-    else:
-        targets = []
-        for finetune_path in args.finetune:
-            finetune = torch.load(
-                finetune_path, map_location="cpu", weights_only=False, mmap=True
-            )
-            checkpoint_type = finetune.get("checkpoint_type")
-            if checkpoint_type not in {
-                "singer_finetune_audit_v1",
-                "singer_finetune_full_v1",
-                "singer_finetune_inference_v1",
-            }:
-                raise ValueError("--finetune must be a singer finetune checkpoint")
-            if finetune["run"].get("config_sha256") != config.digest():
-                raise ValueError("finetune checkpoint config does not match --config")
-            if parent is not None:
-                parent_sha256 = parent.get("source_checkpoint_sha256") or _sha256(
-                    args.parent
-                )
-                if finetune["run"].get("parent_checkpoint_sha256") != parent_sha256:
-                    raise ValueError("finetune checkpoint belongs to another parent")
-            states = (
-                ("ema",)
-                if checkpoint_type == "singer_finetune_inference_v1"
-                else args.states
-            )
-            if "ema" not in finetune or "target_code_ema" not in finetune:
-                raise ValueError(
-                    "inference checkpoint must contain EMA model and target code"
-                )
-            for state in states:
-                targets.append(
-                    {
-                        "mode": "finetune",
-                        "name": finetune_path.stem,
-                        "speaker_id": 0,
-                        "state": state,
-                        "code": torch.as_tensor(
-                            finetune[
-                                "target_code" if state == "raw" else "target_code_ema"
-                            ]
-                        )
-                        .float()
-                        .to(device)[None],
-                        "model_state": finetune["model" if state == "raw" else "ema"],
-                        "finetune": finetune,
-                        "finetune_path": finetune_path,
-                    }
-                )
-    for target_spec in targets:
-        model.load_state_dict(target_spec["model_state"], strict=True)
-        for guidance in args.guidance:
-            mel = render_mel(
-                system,
-                content,
-                f0,
-                rms,
-                noise,
-                target_spec["speaker_id"],
-                target_spec["code"],
-                device,
-                visible=768,
-                core=384,
-                overlap=64,
-                batch_size=args.window_batch_size,
-                steps=args.steps,
-                guidance_strength=guidance,
-            )
-            converted = vocode_chunked(
-                vocoder, mel, f0, device, config.feature.hop_length
-            )
-            converted = F.pad(
-                converted, (0, max(0, expected_samples - converted.numel()))
-            )
-            converted = converted[:expected_samples]
-            guidance_name = str(guidance).replace(".", "p")
-            if target_spec["mode"] == "foundation":
-                filename = (
-                    f"foundation-{_filename_component(target_spec['name'])}"
-                    f"-guidance-{guidance_name}.wav"
-                )
-                result = {
-                    "target_mode": "foundation",
-                    "foundation_speaker": target_spec["name"],
-                    "speaker_id": target_spec["speaker_id"],
-                    "foundation_state": "ema",
-                }
-            else:
-                finetune = target_spec["finetune"]
-                finetune_path = target_spec["finetune_path"]
-                frames = int(finetune["progress"]["seen_target_valid_frames"])
-                filename = (
-                    f"finetune-{frames / 1_000_000:.3f}M-{target_spec['state']}"
-                    f"-guidance-{guidance_name}.wav"
-                )
-                result = {
-                    "target_mode": "finetune",
-                    "finetune": str(finetune_path),
-                    "finetune_sha256": _sha256(finetune_path),
-                    "state": target_spec["state"],
-                    "step": int(finetune["progress"]["global_step"]),
-                    "seen_target_valid_frames": frames,
-                }
-            sf.write(
-                args.output / filename,
-                converted.numpy(),
-                config.feature.sample_rate,
-                subtype="PCM_24",
-            )
-            result.update(
-                {
-                    "guidance_strength": guidance,
-                    "output": filename,
-                    "output_sha256": _sha256(args.output / filename),
-                    "peak": float(converted.abs().max()),
-                }
-            )
-            results.append(result)
-            print(json.dumps(result), flush=True)
-    manifest = {
-        "artifact_type": "rift_harp_singer_conversion_v2",
-        "target_mode": "foundation" if args.foundation_speaker else "finetune",
-        "input": str(args.input),
-        "input_sha256": _sha256(args.input),
-        "parent": str(args.parent) if args.parent is not None else None,
-        "parent_sha256": _sha256(args.parent) if args.parent is not None else None,
-        "solver": {"method": "euler", "steps": args.steps},
-        "guidance_strengths": args.guidance,
-        "seed": args.seed,
-        "window": {"visible": 768, "core": 384, "overlap": 64},
-        "source_frames": content.shape[0],
-        "source_samples": expected_samples,
-        "source_peak": float(waveform.abs().max()),
-        "vocoder_revision": vocoder_contract.revision,
-        "runtime": runtime,
-        "elapsed_seconds": time.time() - started,
-        "results": results,
-    }
-    (args.output / "manifest.json").write_text(
-        json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
-    )
+    try:
+        sf.write(
+            staging / "converted.wav",
+            audio.numpy(),
+            record["sample_rate"],
+            subtype="FLOAT",
+        )
+        record["output_sha256"] = _sha256(staging / "converted.wav")
+        (staging / "manifest.json").write_text(
+            json.dumps(record, indent=2) + "\n", encoding="utf-8"
+        )
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.renameat2(
+            -100, os.fsencode(staging), -100, os.fsencode(args.output), 1
+        ):
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error), str(args.output))
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    print(json.dumps(record), flush=True)
 
 
 if __name__ == "__main__":
